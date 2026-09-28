@@ -327,13 +327,14 @@ function SizingPanel({ s, overnight, wheel }: { s: SizingSettings; overnight: bo
   const bp = s.account * (overnight ? s.overnightLeverage : s.dayTradeLeverage);
   const summary = wheel
     ? `${usd0(s.wheelAllocation)} of cash collateral per wheel position`
-    : `Risk ${s.riskPct}% of ${usd0(s.account)} = ${usd0((s.account * s.riskPct) / 100)} per trade · ${overnight ? "overnight" : "day-trade"} buying power ${usd0(bp)} · max ${s.maxAdvPct}% of avg volume`;
+    : `Risk ${s.riskPct}% of ${usd0(s.account)} = ${usd0((s.account * s.riskPct) / 100)} per trade · max ${s.maxPosition > 0 ? usd0(s.maxPosition) : "no limit"} per position · ${overnight ? "overnight" : "day-trade"} buying power ${usd0(bp)} · max ${s.maxAdvPct}% of avg volume`;
   return (
     <details style={{ marginTop: 8 }}>
       <summary style={{ fontWeight: 400 }}><b>Position sizing:</b> <span className="muted">{summary}</span></summary>
       <form action={saveSizing} className="filters">
         <label>Account size ($)<input name="account" inputMode="decimal" defaultValue={s.account} /></label>
         <label>Risk per trade (% of account)<input name="riskPct" inputMode="decimal" defaultValue={s.riskPct} /></label>
+        <label>Max $ per position (0 = no limit)<input name="maxPosition" inputMode="decimal" defaultValue={s.maxPosition} /></label>
         <label>Day-trade buying power (× account)<input name="dayTradeLeverage" inputMode="decimal" defaultValue={s.dayTradeLeverage} /></label>
         <label>Overnight buying power (× account)<input name="overnightLeverage" inputMode="decimal" defaultValue={s.overnightLeverage} /></label>
         <label>Max % of avg daily volume<input name="maxAdvPct" inputMode="decimal" defaultValue={s.maxAdvPct} /></label>
@@ -341,7 +342,7 @@ function SizingPanel({ s, overnight, wheel }: { s: SizingSettings; overnight: bo
         <button type="submit" style={{ alignSelf: "flex-end" }}>Save sizing</button>
       </form>
       <div className="muted" style={{ fontSize: 12 }}>
-        Shares = the smallest of (dollar risk ÷ risk per share), (buying power ÷ entry) and ({s.maxAdvPct}% of average daily volume). The Sized by column shows which one applied.
+        Shares = the smallest of (dollar risk ÷ risk per share), (buying power ÷ entry), (max $ per position ÷ entry) and ({s.maxAdvPct}% of average daily volume). The Sized by column shows which one applied.
         Commissions, slippage and short-borrow availability aren&apos;t included.
       </div>
     </details>

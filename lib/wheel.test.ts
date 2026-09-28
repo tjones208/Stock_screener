@@ -170,4 +170,11 @@ test("position sizing", async () => {
   const s = normalizeSizing({ account: "250000", riskPct: "abc", maxAdvPct: "-1", dayTradeLeverage: 4 });
   assert.deepEqual(s, { ...DEFAULT_SIZING, account: 250000 });
   assert.equal(sizePosition(long, row({ avg_vol20: 1e8 }), false, s)!.qty, 5000); // $2,500 ÷ $0.50
+
+  // Max $ per position: $30,000 ÷ $20 = 1,500 sh, below the 2,400 the $1,200 risk would allow.
+  const capped = sizePosition(long, row({ avg_vol20: 1e8 }), false, normalizeSizing({ maxPosition: "30000" }))!;
+  assert.deepEqual([capped.qty, capped.position, capped.risk, capped.cap], [1500, 30000, 750, "max position"]);
+  // 0 (or blank) means no cap; negative input falls back to the default (no cap).
+  assert.equal(normalizeSizing({ maxPosition: "0" }).maxPosition, 0);
+  assert.equal(normalizeSizing({ maxPosition: "-5" }).maxPosition, 0);
 });

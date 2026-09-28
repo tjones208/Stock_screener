@@ -95,6 +95,7 @@ export async function saveSizing(form: FormData) {
     dayTradeLeverage: pctOrNum("dayTradeLeverage"),
     overnightLeverage: pctOrNum("overnightLeverage"),
     maxAdvPct: pctOrNum("maxAdvPct"),
+    maxPosition: pctOrNum("maxPosition") || "0",
     wheelAllocation: pctOrNum("wheelAllocation"),
   }));
   revalidatePath("/");

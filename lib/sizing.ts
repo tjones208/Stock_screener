@@ -13,6 +13,8 @@ export type SizingSettings = {
   overnightLeverage: number;
   /** Cap shares at this percent of the 20-day average daily volume. */
   maxAdvPct: number;
+  /** Most dollars to put into any one stock position. 0 = no cap beyond buying power. */
+  maxPosition: number;
   /** Dollars of cash collateral per wheel position (cash-secured puts). */
   wheelAllocation: number;
 };
@@ -23,6 +25,7 @@ export const DEFAULT_SIZING: SizingSettings = {
   dayTradeLeverage: 4,
   overnightLeverage: 2,
   maxAdvPct: 1,
+  maxPosition: 0,
   wheelAllocation: 5_000,
 };
 
@@ -35,6 +38,7 @@ export function normalizeSizing(input: Partial<Record<keyof SizingSettings, unkn
     dayTradeLeverage: [1, 10],
     overnightLeverage: [1, 10],
     maxAdvPct: [0.01, 100],
+    maxPosition: [0, 1e9],
     wheelAllocation: [100, 1e9],
   };
   for (const k of Object.keys(limits) as (keyof SizingSettings)[]) {
@@ -56,7 +60,7 @@ export type Size = {
   /** Dollars made if the target is hit. */
   reward: number;
   /** Which limit set the size. */
-  cap: "risk" | "buying power" | "liquidity" | "allocation";
+  cap: "risk" | "buying power" | "max position" | "liquidity" | "allocation";
 };
 
 export function sizePosition(
@@ -79,11 +83,12 @@ export function sizePosition(
   const byRisk = Math.floor((s.account * s.riskPct) / 100 / perShare);
   const bp = s.account * (overnight ? s.overnightLeverage : s.dayTradeLeverage);
   const byBp = Math.floor(bp / l.entry);
+  const byMax = s.maxPosition > 0 ? Math.floor(s.maxPosition / l.entry) : Infinity;
   const byLiq = r.avg_vol20 != null ? Math.floor((r.avg_vol20 * s.maxAdvPct) / 100) : Infinity;
 
-  const qty = Math.min(byRisk, byBp, byLiq);
+  const qty = Math.min(byRisk, byBp, byMax, byLiq);
   if (!(qty >= 1) || !Number.isFinite(qty)) return null;
-  const cap = qty === byRisk ? "risk" : qty === byBp ? "buying power" : "liquidity";
+  const cap = qty === byRisk ? "risk" : qty === byMax ? "max position" : qty === byBp ? "buying power" : "liquidity";
   return {
     qty,
     unit: "sh",
