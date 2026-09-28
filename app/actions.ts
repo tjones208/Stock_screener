@@ -4,6 +4,8 @@ import { redirect } from "next/navigation";
 import { db } from "@/lib/db";
 import { cleanFilters } from "@/lib/screen";
 import { ALERT_KINDS, type AlertKind } from "@/lib/alerts";
+import { setSizing } from "@/lib/settings";
+import { normalizeSizing } from "@/lib/sizing";
 
 const T = (s: FormDataEntryValue | null) => String(s ?? "").trim().toUpperCase();
 
@@ -22,6 +24,7 @@ export async function addToWatchlist(form: FormData) {
   const ticker = T(form.get("ticker"));
   const id = Number(form.get("watchlist_id"));
   if (ticker && id) await db().from("ss_watchlist_items").upsert({ watchlist_id: id, ticker });
+  revalidatePath("/");
   revalidatePath("/watchlists");
   revalidatePath(`/t/${ticker}`);
 }
@@ -29,6 +32,7 @@ export async function addToWatchlist(form: FormData) {
 export async function removeFromWatchlist(form: FormData) {
   const ticker = T(form.get("ticker"));
   await db().from("ss_watchlist_items").delete().eq("watchlist_id", Number(form.get("watchlist_id"))).eq("ticker", ticker);
+  revalidatePath("/");
   revalidatePath("/watchlists");
   revalidatePath(`/t/${ticker}`);
 }
@@ -81,4 +85,30 @@ export async function toggleAlert(form: FormData) {
 export async function deleteAlert(form: FormData) {
   await db().from("ss_alert_rules").delete().eq("id", Number(form.get("id")));
   revalidatePath("/alerts");
+}
+
+export async function saveSizing(form: FormData) {
+  const pctOrNum = (k: string) => String(form.get(k) ?? "").replace(/[$,%\s]/g, "");
+  await setSizing(normalizeSizing({
+    account: pctOrNum("account"),
+    riskPct: pctOrNum("riskPct"),
+    dayTradeLeverage: pctOrNum("dayTradeLeverage"),
+    overnightLeverage: pctOrNum("overnightLeverage"),
+    maxAdvPct: pctOrNum("maxAdvPct"),
+    wheelAllocation: pctOrNum("wheelAllocation"),
+  }));
+  revalidatePath("/");
+}
+
+/** Star/unstar a ticker from the screener: adds it to the list, or removes it if already there. */
+export async function toggleWatchlist(form: FormData) {
+  const ticker = T(form.get("ticker"));
+  const id = Number(form.get("watchlist_id"));
+  if (!ticker || !id) return;
+  const { data } = await db().from("ss_watchlist_items").select("ticker").eq("watchlist_id", id).eq("ticker", ticker).maybeSingle();
+  if (data) await db().from("ss_watchlist_items").delete().eq("watchlist_id", id).eq("ticker", ticker);
+  else await db().from("ss_watchlist_items").insert({ watchlist_id: id, ticker });
+  revalidatePath("/");
+  revalidatePath("/watchlists");
+  revalidatePath(`/t/${ticker}`);
 }

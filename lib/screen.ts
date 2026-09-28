@@ -231,7 +231,7 @@ export function sortGetter(key: string): (r: ScreenerRow) => unknown {
 
 /** Keep only filter keys we understand (from URL params or saved screens). */
 export function cleanFilters(input: Record<string, string | string[] | undefined>): Filters {
-  const allowed = new Set<string>(["sector", "type", "q", "sort", "dir", "strategy", ...Object.keys(BOOL_FILTERS)]);
+  const allowed = new Set<string>(["sector", "type", "q", "sort", "dir", "strategy", "side", ...Object.keys(BOOL_FILTERS)]);
   for (const f of NUMERIC_FIELDS) {
     allowed.add(`${f.key}_min`);
     allowed.add(`${f.key}_max`);

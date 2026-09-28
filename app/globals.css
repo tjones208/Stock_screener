@@ -67,3 +67,4 @@ tr:hover td { background: var(--panel-2); }
 .notice { border-left: 3px solid var(--warn); padding: 8px 12px; background: var(--panel); border-radius: 6px; margin: 8px 0; }
 @media (min-width: 900px) { .chart { height: 520px; } }
 td.lvl, th.lvl { background: color-mix(in srgb, var(--accent) 6%, var(--panel)); }
+button.star { background: none; border: 0; padding: 0 2px; min-height: 0; color: var(--warn); font-size: 18px; line-height: 1; font-weight: 400; }

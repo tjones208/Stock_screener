@@ -4,9 +4,15 @@ import { loadScreener } from "@/lib/jobs";
 import { applyFilters, BOOL_FILTERS, cleanFilters, DEFAULT_FILTERS, displayValue, GROUPS, NUMERIC_FIELDS, type Filters, type ScreenerRow } from "@/lib/screen";
 import { STRATEGIES, STRATEGY_BY_KEY } from "@/lib/strategies";
 import { LEVEL_RULES, levelsFor, type Levels } from "@/lib/levels";
+import { sizePosition, type Size, type SizingSettings } from "@/lib/sizing";
+import { getSizing } from "@/lib/settings";
 import { big, money, num, pct, signClass } from "@/lib/format";
-import { deleteScreen, saveScreen } from "./actions";
+import { deleteScreen, saveScreen, saveSizing } from "./actions";
 import { StrategyPicker } from "./strategy-picker";
+import { WatchlistTarget } from "./watchlist-target";
+import { WL_COOKIE } from "@/lib/cookies";
+import { toggleWatchlist } from "./actions";
+import { cookies } from "next/headers";
 
 export const dynamic = "force-dynamic";
 
@@ -65,7 +71,17 @@ function qs(f: Filters, patch: Filters = {}) {
 export default async function Screener({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
   const sp = await searchParams;
   const filters = Object.keys(sp).length ? cleanFilters(sp) : DEFAULT_FILTERS;
-  const [rows, { data: screens }] = await Promise.all([loadScreener(), db().from("ss_screens").select("id, name, filters").order("name")]);
+  const [rows, { data: screens }, sizing, { data: lists }, { data: items }, jar] = await Promise.all([
+    loadScreener(),
+    db().from("ss_screens").select("id, name, filters").order("name"),
+    getSizing(),
+    db().from("ss_watchlists").select("id, name").order("sort_order").order("name"),
+    db().from("ss_watchlist_items").select("watchlist_id, ticker"),
+    cookies(),
+  ]);
+  const wantedList = Number(jar.get(WL_COOKIE)?.value);
+  const targetList = lists?.find((l) => l.id === wantedList) ?? lists?.[0];
+  const starred = new Set((items ?? []).filter((i) => i.watchlist_id === targetList?.id).map((i) => i.ticker));
   const results = applyFilters(rows, filters);
   const sectors = [...new Set(rows.map((r) => r.sector).filter(Boolean))].sort() as string[];
   const asOf = rows.reduce((m, r) => (r.as_of > m ? r.as_of : m), "");
@@ -73,12 +89,23 @@ export default async function Screener({ searchParams }: { searchParams: Promise
   const strategy = filters.strategy ? STRATEGY_BY_KEY.get(filters.strategy) : undefined;
   const cols = (strategy?.columns ?? DEFAULT_COLUMNS).filter((k) => COLUMNS[k]).map((k) => ({ key: k, ...COLUMNS[k] }));
   const sortKey = filters.sort || "wheel_score";
-  const shown = results.slice(0, 300);
-  const levels = new Map<string, Levels | null>(strategy ? shown.map((r) => [r.ticker, levelsFor(strategy.key, r)]) : []);
+  const levels = new Map<string, Levels | null>(strategy ? results.map((r) => [r.ticker, levelsFor(strategy.key, r)]) : []);
+  const side = strategy && (filters.side === "long" || filters.side === "short") ? filters.side : "";
+  const sided = side
+    ? results.filter((r) => levels.get(r.ticker)?.side === (side === "long" ? "Long" : "Short"))
+    : results;
+  const shown = sided.slice(0, 300);
+  const overnight = strategy?.style === "Swing";
+  const sizes = new Map<string, Size | null>(
+    shown.map((r) => {
+      const l = levels.get(r.ticker);
+      return [r.ticker, l ? sizePosition(l, r, overnight, sizing) : null];
+    }),
+  );
   const isWheel = strategy?.key === "wheel";
   const levelHeaders = isWheel
-    ? ["Trade", "Credit", "Breakeven", "Buy back"]
-    : ["Side", "Entry", "Stop", "Target", "R:R", "Risk/sh"];
+    ? ["Trade", "Credit", "Breakeven", "Buy back", "Contracts", "Collateral", "Profit @ target"]
+    : ["Side", "Entry", "Stop", "Target", "R:R", "Risk/sh", "Shares", "Position", "$ Risk", "$ @ Target", "Sized by"];
 
   return (
     <main>
@@ -112,6 +139,7 @@ export default async function Screener({ searchParams }: { searchParams: Promise
             {strategy.style === "Day trade" && (
               <div className="muted" style={{ marginTop: 4, fontSize: 12 }}>Built from today&apos;s end-of-day data: this is tomorrow&apos;s watchlist. Entries and exits happen on a live intraday chart.</div>
             )}
+            <SizingPanel s={sizing} overnight={overnight} wheel={isWheel} />
           </div>
         )}
       </div>
@@ -131,6 +159,16 @@ export default async function Screener({ searchParams }: { searchParams: Promise
                 {sectors.map((s) => <option key={s}>{s}</option>)}
               </select>
             </label>
+            {strategy && (
+              <label>
+                Side (from the trade plan)
+                <select name="side" defaultValue={filters.side ?? ""}>
+                  <option value="">Long &amp; short</option>
+                  <option value="long">Long only</option>
+                  <option value="short">Short only</option>
+                </select>
+              </label>
+            )}
             <label>
               Type
               <select name="type" defaultValue={filters.type ?? ""}>
@@ -188,7 +226,10 @@ export default async function Screener({ searchParams }: { searchParams: Promise
         )}
       </details>
 
-      <h2>{results.length} matches{results.length > 300 ? " (showing 300)" : ""}</h2>
+      <div className="row spread">
+        <h2>{sided.length} matches{sided.length > 300 ? " (showing 300)" : ""}</h2>
+        {targetList && <WatchlistTarget lists={lists ?? []} current={targetList.id} />}
+      </div>
       <div className="table-wrap">
         <table>
           <thead>
@@ -211,10 +252,26 @@ export default async function Screener({ searchParams }: { searchParams: Promise
             {shown.map((r) => (
               <tr key={r.ticker}>
                 <td>
-                  <Link href={`/t/${r.ticker}`}><b>{r.ticker}</b></Link>
+                  <div className="row" style={{ gap: 6, flexWrap: "nowrap" }}>
+                    {targetList && (
+                      <form action={toggleWatchlist}>
+                        <input type="hidden" name="ticker" value={r.ticker} />
+                        <input type="hidden" name="watchlist_id" value={targetList.id} />
+                        <button
+                          type="submit"
+                          className="star"
+                          aria-label={starred.has(r.ticker) ? `Remove ${r.ticker} from ${targetList.name}` : `Add ${r.ticker} to ${targetList.name}`}
+                          title={starred.has(r.ticker) ? `On ${targetList.name}: tap to remove` : `Add to ${targetList.name}`}
+                        >
+                          {starred.has(r.ticker) ? "★" : "☆"}
+                        </button>
+                      </form>
+                    )}
+                    <Link href={`/t/${r.ticker}`}><b>{r.ticker}</b></Link>
+                  </div>
                   <div className="muted" style={{ fontSize: 11, maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis" }}>{r.name}</div>
                 </td>
-                {strategy && <LevelCells l={levels.get(r.ticker) ?? null} wheel={isWheel} />}
+                {strategy && <LevelCells l={levels.get(r.ticker) ?? null} size={sizes.get(r.ticker) ?? null} wheel={isWheel} />}
                 {cols.map((c) => <td key={c.key}>{c.render(r)}</td>)}
               </tr>
             ))}
@@ -225,9 +282,13 @@ export default async function Screener({ searchParams }: { searchParams: Promise
   );
 }
 
-function LevelCells({ l, wheel }: { l: Levels | null; wheel: boolean }) {
-  const n = wheel ? 4 : 6;
+const usd0 = (v: number) => `$${Math.round(v).toLocaleString("en-US")}`;
+
+function LevelCells({ l, size, wheel }: { l: Levels | null; size: Size | null; wheel: boolean }) {
+  const n = wheel ? 7 : 11;
   if (!l) return <>{Array.from({ length: n }, (_, i) => <td key={i} className="lvl muted">—</td>)}</>;
+  const sizeCells = (count: number, cells: React.ReactNode[]) =>
+    size ? cells : Array.from({ length: count }, (_, i) => <td key={`s${i}`} className="lvl muted">—</td>);
   if (wheel) {
     return (
       <>
@@ -235,6 +296,11 @@ function LevelCells({ l, wheel }: { l: Levels | null; wheel: boolean }) {
         <td className="lvl">{money(l.entry)}</td>
         <td className="lvl">{money(l.stop)}</td>
         <td className="lvl up">{money(l.target)}</td>
+        {sizeCells(3, [
+          <td key="q" className="lvl"><b>{size?.qty}</b></td>,
+          <td key="p" className="lvl">{size && usd0(size.position)}</td>,
+          <td key="w" className="lvl up">{size && usd0(size.reward)}</td>,
+        ])}
       </>
     );
   }
@@ -246,6 +312,38 @@ function LevelCells({ l, wheel }: { l: Levels | null; wheel: boolean }) {
       <td className="lvl up">{money(l.target)}</td>
       <td className="lvl">{l.rr == null ? "—" : `${l.rr.toFixed(1)}R`}</td>
       <td className="lvl">{money(Math.abs(l.entry - l.stop))}</td>
+      {sizeCells(5, [
+        <td key="q" className="lvl"><b>{size?.qty.toLocaleString("en-US")}</b></td>,
+        <td key="p" className="lvl">{size && usd0(size.position)}</td>,
+        <td key="r" className="lvl down">{size && usd0(size.risk)}</td>,
+        <td key="w" className="lvl up">{size && usd0(size.reward)}</td>,
+        <td key="c" className="lvl"><span className="pill">{size?.cap}</span></td>,
+      ])}
     </>
+  );
+}
+
+function SizingPanel({ s, overnight, wheel }: { s: SizingSettings; overnight: boolean; wheel: boolean }) {
+  const bp = s.account * (overnight ? s.overnightLeverage : s.dayTradeLeverage);
+  const summary = wheel
+    ? `${usd0(s.wheelAllocation)} of cash collateral per wheel position`
+    : `Risk ${s.riskPct}% of ${usd0(s.account)} = ${usd0((s.account * s.riskPct) / 100)} per trade · ${overnight ? "overnight" : "day-trade"} buying power ${usd0(bp)} · max ${s.maxAdvPct}% of avg volume`;
+  return (
+    <details style={{ marginTop: 8 }}>
+      <summary style={{ fontWeight: 400 }}><b>Position sizing:</b> <span className="muted">{summary}</span></summary>
+      <form action={saveSizing} className="filters">
+        <label>Account size ($)<input name="account" inputMode="decimal" defaultValue={s.account} /></label>
+        <label>Risk per trade (% of account)<input name="riskPct" inputMode="decimal" defaultValue={s.riskPct} /></label>
+        <label>Day-trade buying power (× account)<input name="dayTradeLeverage" inputMode="decimal" defaultValue={s.dayTradeLeverage} /></label>
+        <label>Overnight buying power (× account)<input name="overnightLeverage" inputMode="decimal" defaultValue={s.overnightLeverage} /></label>
+        <label>Max % of avg daily volume<input name="maxAdvPct" inputMode="decimal" defaultValue={s.maxAdvPct} /></label>
+        <label>Wheel $ per position<input name="wheelAllocation" inputMode="decimal" defaultValue={s.wheelAllocation} /></label>
+        <button type="submit" style={{ alignSelf: "flex-end" }}>Save sizing</button>
+      </form>
+      <div className="muted" style={{ fontSize: 12 }}>
+        Shares = the smallest of (dollar risk ÷ risk per share), (buying power ÷ entry) and ({s.maxAdvPct}% of average daily volume). The Sized by column shows which one applied.
+        Commissions, slippage and short-borrow availability aren&apos;t included.
+      </div>
+    </details>
   );
 }

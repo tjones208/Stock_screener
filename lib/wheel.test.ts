@@ -63,6 +63,7 @@ test("filters", () => {
   const rows = [row({}), row({ ticker: "X", close: 60 }), row({ ticker: "Y", close: 20, sma200: 25 })];
   const f = cleanFilters({ close_max: "50", above_sma200: "1", bogus: "1" });
   assert.deepEqual(Object.keys(f).sort(), ["above_sma200", "close_max"]);
+  assert.equal(cleanFilters({ side: "short" }).side, "short"); // side survives (applied from trade plans in the page)
   assert.deepEqual(applyFilters(rows, f).map((r) => r.ticker), ["F"]);
   assert.deepEqual(applyFilters(rows, { put_annual_yield_min: "20" }).map((r) => r.ticker).sort(), ["F", "X", "Y"]);
   assert.deepEqual(applyFilters(rows, { put_annual_yield_min: "30" }), []);
@@ -135,4 +136,38 @@ test("strategy levels", async () => {
   assert.equal(levelsFor("unknown", base), null);
   // Stop > 20% from entry (ATR ≈ 79% of price, like a pump-and-dump microcap) → no plan.
   assert.equal(levelsFor("orb", row({ ...base, close: 7.7, atr14: 6.07, day_high: 12.1, day_low: 6.8, range_pos: 17 })), null);
+});
+
+test("position sizing", async () => {
+  const { sizePosition, normalizeSizing, DEFAULT_SIZING } = await import("./sizing.ts");
+  const long = { side: "Long" as const, entry: 20, stop: 19.5, target: 21, rr: 2, how: "" };
+
+  // $120k × 1% = $1,200 risk ÷ $0.50/share = 2,400 sh ($48k) — under 4× BP and 1% of 10M ADV.
+  const a = sizePosition(long, row({ avg_vol20: 10_000_000 }), false)!;
+  assert.deepEqual([a.qty, a.position, a.risk, a.reward, a.cap], [2400, 48000, 1200, 2400, "risk"]);
+
+  // Tight stop: $1,200 ÷ $0.02 = 60,000 sh ($1.2M) → capped by 4× BP ($480k ÷ $20 = 24,000 sh).
+  const tight = { ...long, stop: 19.98 };
+  assert.equal(sizePosition(tight, row({ avg_vol20: 1e9 }), false)!.cap, "buying power");
+  assert.equal(sizePosition(tight, row({ avg_vol20: 1e9 }), false)!.qty, 24000);
+  // Overnight (swing) uses 2× → 12,000 sh.
+  assert.equal(sizePosition(tight, row({ avg_vol20: 1e9 }), true)!.qty, 12000);
+
+  // Thin stock: 1% of 100k ADV = 1,000 sh.
+  const thin = sizePosition(long, row({ avg_vol20: 100_000 }), false)!;
+  assert.deepEqual([thin.qty, thin.cap], [1000, "liquidity"]);
+
+  // Shorts size the same way off |entry − stop|.
+  const short = { side: "Short" as const, entry: 20, stop: 20.5, target: 19, rr: 2, how: "" };
+  assert.equal(sizePosition(short, row({ avg_vol20: 10_000_000 }), false)!.qty, 2400);
+
+  // Wheel: $5,000 ÷ ($10 strike × 100) = 5 contracts; profit at 50% buy-back of a $0.20 credit = $50.
+  const put = { side: "Sell put" as const, entry: 0.2, stop: 9.8, target: 0.1, rr: null, how: "" };
+  const w = sizePosition(put, row({}), false)!;
+  assert.deepEqual([w.qty, w.unit, w.position, Math.round(w.reward)], [5, "ct", 5000, 50]);
+
+  // Settings: bad or out-of-range input falls back to the defaults.
+  const s = normalizeSizing({ account: "250000", riskPct: "abc", maxAdvPct: "-1", dayTradeLeverage: 4 });
+  assert.deepEqual(s, { ...DEFAULT_SIZING, account: 250000 });
+  assert.equal(sizePosition(long, row({ avg_vol20: 1e8 }), false, s)!.qty, 5000); // $2,500 ÷ $0.50
 });
