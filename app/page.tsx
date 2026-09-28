@@ -3,7 +3,8 @@ import { db } from "@/lib/db";
 import { loadScreener } from "@/lib/jobs";
 import { applyFilters, BOOL_FILTERS, cleanFilters, DEFAULT_FILTERS, displayValue, GROUPS, NUMERIC_FIELDS, type Filters, type ScreenerRow } from "@/lib/screen";
 import { STRATEGIES, STRATEGY_BY_KEY } from "@/lib/strategies";
-import { big, num, pct, signClass } from "@/lib/format";
+import { LEVEL_RULES, levelsFor, type Levels } from "@/lib/levels";
+import { big, money, num, pct, signClass } from "@/lib/format";
 import { deleteScreen, saveScreen } from "./actions";
 import { StrategyPicker } from "./strategy-picker";
 
@@ -72,6 +73,12 @@ export default async function Screener({ searchParams }: { searchParams: Promise
   const strategy = filters.strategy ? STRATEGY_BY_KEY.get(filters.strategy) : undefined;
   const cols = (strategy?.columns ?? DEFAULT_COLUMNS).filter((k) => COLUMNS[k]).map((k) => ({ key: k, ...COLUMNS[k] }));
   const sortKey = filters.sort || "wheel_score";
+  const shown = results.slice(0, 300);
+  const levels = new Map<string, Levels | null>(strategy ? shown.map((r) => [r.ticker, levelsFor(strategy.key, r)]) : []);
+  const isWheel = strategy?.key === "wheel";
+  const levelHeaders = isWheel
+    ? ["Trade", "Credit", "Breakeven", "Buy back"]
+    : ["Side", "Entry", "Stop", "Target", "R:R", "Risk/sh"];
 
   return (
     <main>
@@ -99,6 +106,9 @@ export default async function Screener({ searchParams }: { searchParams: Promise
           <div style={{ marginTop: 8 }}>
             <div>{strategy.summary}</div>
             <div className="muted" style={{ marginTop: 4 }}><b>Playbook:</b> {strategy.playbook}</div>
+            {LEVEL_RULES[strategy.key] && (
+              <div className="muted" style={{ marginTop: 4 }}><b>Entry/exit levels:</b> {LEVEL_RULES[strategy.key]}</div>
+            )}
             {strategy.style === "Day trade" && (
               <div className="muted" style={{ marginTop: 4, fontSize: 12 }}>Built from today&apos;s end-of-day data: this is tomorrow&apos;s watchlist. Entries and exits happen on a live intraday chart.</div>
             )}
@@ -184,6 +194,7 @@ export default async function Screener({ searchParams }: { searchParams: Promise
           <thead>
             <tr>
               <th><Link href={qs(filters, { sort: "ticker", dir: filters.sort === "ticker" && filters.dir === "asc" ? "desc" : "asc" })}>Ticker</Link></th>
+              {strategy && levelHeaders.map((h) => <th key={h} className="lvl">{h}</th>)}
               {cols.map((c) => {
                 const key = c.sort ?? c.key;
                 return (
@@ -197,12 +208,13 @@ export default async function Screener({ searchParams }: { searchParams: Promise
             </tr>
           </thead>
           <tbody>
-            {results.slice(0, 300).map((r) => (
+            {shown.map((r) => (
               <tr key={r.ticker}>
                 <td>
                   <Link href={`/t/${r.ticker}`}><b>{r.ticker}</b></Link>
                   <div className="muted" style={{ fontSize: 11, maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis" }}>{r.name}</div>
                 </td>
+                {strategy && <LevelCells l={levels.get(r.ticker) ?? null} wheel={isWheel} />}
                 {cols.map((c) => <td key={c.key}>{c.render(r)}</td>)}
               </tr>
             ))}
@@ -210,5 +222,30 @@ export default async function Screener({ searchParams }: { searchParams: Promise
         </table>
       </div>
     </main>
+  );
+}
+
+function LevelCells({ l, wheel }: { l: Levels | null; wheel: boolean }) {
+  const n = wheel ? 4 : 6;
+  if (!l) return <>{Array.from({ length: n }, (_, i) => <td key={i} className="lvl muted">—</td>)}</>;
+  if (wheel) {
+    return (
+      <>
+        <td className="lvl" style={{ textAlign: "left" }}>{l.how}</td>
+        <td className="lvl">{money(l.entry)}</td>
+        <td className="lvl">{money(l.stop)}</td>
+        <td className="lvl up">{money(l.target)}</td>
+      </>
+    );
+  }
+  return (
+    <>
+      <td className={`lvl ${l.side === "Long" ? "up" : "down"}`} title={l.how}>{l.side}</td>
+      <td className="lvl"><b>{money(l.entry)}</b></td>
+      <td className="lvl down">{money(l.stop)}</td>
+      <td className="lvl up">{money(l.target)}</td>
+      <td className="lvl">{l.rr == null ? "—" : `${l.rr.toFixed(1)}R`}</td>
+      <td className="lvl">{money(Math.abs(l.entry - l.stop))}</td>
+    </>
   );
 }

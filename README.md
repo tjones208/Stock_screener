@@ -4,6 +4,7 @@ A personal stock screener for the **wheel strategy** (cash-secured puts → cove
 Next.js on Vercel Hobby + Supabase (`meal-plan-sync` project, tables prefixed `ss_`). $0 to run.
 
 - **Screener:** 30 numeric filters (price, volume, technicals, fundamentals, wheel metrics) plus 13 conditions (above SMA 200, golden cross, near 52w low, …). Filters live in the URL, and you can save any filter set as a named screen.
+- **Strategy presets:** pick a strategy (wheel, VWAP reversion, opening-range breakout, gap & go, NR7 squeeze, momentum, pullback, oversold bounce) to prefill filters and columns. Each row shows mechanical **entry / stop / target / R:R** levels from that strategy's rules (`lib/levels.ts`). They're based on end-of-day data and are a plan for the next session, not a prediction.
 - **Wheel:** each night the app pulls put chains and ranks them by annualized yield, then IV, then low delta, then liquidity (OI and spread). Strikes are capped at $50, so collateral stays ≤ $5,000.
 - **Ticker page:** candlestick chart ([TradingView Lightweight Charts](https://www.tradingview.com/lightweight-charts/)) with EMA21, SMA50/200 and the best put strike, plus technicals, fundamentals and put candidates.
 - **Watchlists:** listed names always get their options scanned, get fundamentals first, and keep full price history.

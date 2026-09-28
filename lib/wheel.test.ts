@@ -55,7 +55,8 @@ const row = (o: Partial<ScreenerRow>): ScreenerRow => ({
   net_margin: 2.5, roe: 10, debt_to_equity: 5, current_ratio: 1.1, free_cash_flow_ttm: null, dividend_yield: null,
   next_earnings_date: null, put_contract: "F261030P00010000", put_expiration: "2026-10-30", put_dte: 32, put_strike: 10,
   put_mid: 0.2, put_iv: 0.35, put_delta: -0.22, put_oi: 5000, put_spread_pct: 0.05, put_annual_yield: 0.23, wheel_score: 40,
-  vwap: 10.9, range_pos: 60, change_5d: 1, change_20d: 3, nr7: false, inside_day: false, ...o,
+  vwap: 10.9, range_pos: 60, change_5d: 1, change_20d: 3, nr7: false, inside_day: false,
+  day_open: 10.8, day_high: 11.2, day_low: 10.7, ...o,
 });
 
 test("filters", () => {
@@ -99,4 +100,39 @@ test("derived filters: ATR%, $ volume, vs VWAP, sort by derived", () => {
   assert.deepEqual(applyFilters([a, b], { sort: "atr_pct", dir: "asc" }).map((r) => r.ticker), ["B", "A"]);
   assert.deepEqual(applyFilters([a, b], { nr7: "1" }), []);
   assert.deepEqual(applyFilters([a, row({ ticker: "C", nr7: true })], { nr7: "1" }).map((r) => r.ticker), ["C"]);
+});
+
+test("strategy levels", async () => {
+  const { levelsFor } = await import("./levels.ts");
+  const { STRATEGIES } = await import("./strategies.ts");
+  const base = row({ close: 11, atr14: 0.4, day_high: 11.2, day_low: 10.7, vwap: 10.9, sma20: 11.5, high_52w: 12 });
+
+  // Every strategy yields a plan for a normal row, with stop and target on the correct sides.
+  for (const s of STRATEGIES) {
+    const l = levelsFor(s.key, base);
+    assert.ok(l, s.key);
+    if (l.side === "Long") assert.ok(l.stop < l.entry && l.entry < l.target, s.key);
+    if (l.side === "Short") assert.ok(l.stop > l.entry && l.entry > l.target, s.key);
+  }
+
+  const orb = levelsFor("orb", base)!; // closed at 60% of range → long break of the high
+  assert.deepEqual([orb.side, orb.entry, orb.stop, orb.target, orb.rr], ["Long", 11.21, 11.01, 11.61, 2]);
+
+  const vwapShort = levelsFor("vwap", base)!; // closed above VWAP → short the stretch
+  assert.deepEqual([vwapShort.side, vwapShort.entry, vwapShort.stop, vwapShort.target], ["Short", 11.2, 11.4, 10.9]);
+  const vwapLong = levelsFor("vwap", row({ ...base, close: 10.6 }))!;
+  assert.deepEqual([vwapLong.side, vwapLong.entry, vwapLong.target], ["Long", 10.6, 10.9]);
+
+  const wheel = levelsFor("wheel", base)!; // strike 10, mid 0.20
+  assert.deepEqual([wheel.side, wheel.entry, wheel.stop, wheel.target, wheel.rr], ["Sell put", 0.2, 9.8, 0.1, null]);
+
+  const over = levelsFor("oversold", base)!; // SMA20 11.5 above close → target the average
+  assert.equal(over.target, 11.5);
+
+  // Missing data → no plan instead of a bogus one.
+  assert.equal(levelsFor("orb", row({ ...base, day_high: null })), null);
+  assert.equal(levelsFor("vwap", row({ ...base, atr14: null })), null);
+  assert.equal(levelsFor("unknown", base), null);
+  // Stop > 20% from entry (ATR ≈ 79% of price, like a pump-and-dump microcap) → no plan.
+  assert.equal(levelsFor("orb", row({ ...base, close: 7.7, atr14: 6.07, day_high: 12.1, day_low: 6.8, range_pos: 17 })), null);
 });

@@ -63,6 +63,9 @@ export type ScreenerRow = {
   change_20d: number | null;
   nr7: boolean | null;
   inside_day: boolean | null;
+  day_open: number | null;
+  day_high: number | null;
+  day_low: number | null;
 };
 
 export const GROUPS = ["Price & volume", "Day trading", "Technical", "Fundamental", "Wheel"] as const;

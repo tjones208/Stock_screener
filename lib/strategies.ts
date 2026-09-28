@@ -52,7 +52,7 @@ export const STRATEGIES: Strategy[] = [
     playbook: "Mark the first 5- or 15-minute high/low; enter on a break with volume, stop at the other side of the range.",
     filters: {
       close_min: "5", close_max: "200", avg_vol20_min: "1000000",
-      vol_ratio_min: "2", atr_pct_min: "3",
+      vol_ratio_min: "2", atr_pct_min: "3", atr_pct_max: "15", dollar_vol_min: "20000000",
       sort: "vol_ratio", dir: "desc",
     },
     columns: ["close", "change_pct", "gap_pct", "vol_ratio", "atr_pct", "range_pos", "dollar_vol", "nr7"],
@@ -65,7 +65,7 @@ export const STRATEGIES: Strategy[] = [
     playbook: "Watch for a second-day move: buy a break of today's high or the premarket high; avoid if it gaps down below today's close.",
     filters: {
       close_min: "2", close_max: "100", avg_vol20_min: "500000",
-      gap_pct_min: "4", vol_ratio_min: "2", range_pos_min: "70",
+      gap_pct_min: "4", vol_ratio_min: "2", range_pos_min: "70", atr_pct_max: "20",
       sort: "gap_pct", dir: "desc",
     },
     columns: ["close", "gap_pct", "change_pct", "vol_ratio", "range_pos", "atr_pct", "pct_from_high"],
