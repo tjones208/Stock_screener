@@ -1,4 +1,5 @@
-// Single-user password login. Cookie = "<expiry>.<hmac>", signed with SESSION_SECRET.
+// Single-user password login. Cookie = "<expiry>.<hmac>", signed with the session key
+// (SESSION_SECRET if set, otherwise derived from the Supabase service-role key).
 // Uses Web Crypto so it runs in middleware and in Node.
 
 export const COOKIE = "ss_session";
@@ -21,6 +22,13 @@ function safeEqual(a: string, b: string) {
   return diff === 0;
 }
 
+/** Signing key for session cookies. Derived so no extra secret has to be created or copied anywhere. */
+export async function sessionKey(): Promise<string | undefined> {
+  if (process.env.SESSION_SECRET) return process.env.SESSION_SECRET;
+  const base = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  return base ? hmac(base, "ss-session-key-v1") : undefined;
+}
+
 export async function makeSession(secret: string) {
   const exp = Math.floor(Date.now() / 1000) + MAX_AGE_S;
   return { value: `${exp}.${await hmac(secret, `session:${exp}`)}`, maxAge: MAX_AGE_S };
@@ -40,9 +48,4 @@ export async function checkPassword(input: string, expected: string | undefined)
   return safeEqual(a, b);
 }
 
-/** Vercel cron (and our pg_cron caller) send Authorization: Bearer <CRON_SECRET>. */
-export function isCron(req: Request): boolean {
-  const secret = process.env.CRON_SECRET;
-  const got = req.headers.get("authorization") ?? "";
-  return !!secret && safeEqual(got, `Bearer ${secret}`);
-}
+export { safeEqual };

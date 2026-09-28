@@ -20,33 +20,29 @@ Next.js on Vercel Hobby + Supabase (`meal-plan-sync` project, tables prefixed `s
 
 Earnings dates and dividend yield aren't available on the free tiers. Those columns stay empty, and "No earnings in next 30 days" passes when the date is unknown.
 
-## Schedule (UTC)
+## Schedule (UTC, run by Supabase pg_cron → the app's `/api/cron/*` routes)
 
 | Job | When | What |
 |---|---|---|
-| `/api/cron/eod` | Mon–Fri 22:05 (≈ 6pm ET) | Load today's bars → recompute indicators → prune old bars. On Mondays it also refreshes the ticker list. |
-| `/api/cron/options` | Tue–Sat 00:05 (≈ 8pm ET) | Scan put chains (top 150 liquid names under $50, plus watchlists), then evaluate alerts and send push. |
-| `/api/cron/fundamentals` | every minute (pg_cron) | 2 tickers per run. |
-| `/api/cron/backfill` | manual / pg_cron until done | Loads about 20 missing days per call, up to 400 days back. |
+| `ss-eod` | Mon–Fri 22:05 (≈ 6pm ET) | Load today's bars → recompute indicators → prune old bars. On Mondays it also refreshes the ticker list. |
+| `ss-options` | Tue–Sat 00:05 (≈ 8pm ET) | Scan put chains (top 150 liquid names under $50, plus watchlists), then evaluate alerts and send push. |
+| `ss-fundamentals` | every minute | 2 tickers per run. Waits until the backfill is done. |
+| `ss-backfill` | every 6 min | Loads about 20 missing days per run, up to 400 days back. Once history is complete it does nothing. |
 
-Vercel Hobby crons fire somewhere within the scheduled hour. The nightly writes also keep the free Supabase project from pausing.
+The cron token lives in the `ss_app_secrets` table, where both pg_cron and the app read it, so it never has to be copied anywhere. See the job log in `ss_job_runs` and the schedules with `select * from cron.job;`. The nightly writes also keep the free Supabase project from pausing.
 
 ## Setup
 
-1. **Vercel → Add New Project →** import this repo (framework: Next.js, no build settings needed).
-2. **Environment variables** (Project → Settings → Environment Variables). The names are in `.env.example`:
-   - `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` (Supabase → Project Settings → API keys → `service_role`)
+1. **Vercel project** `stock-screener` (Buckhorn team) is linked to this repo. Every push to `main` deploys to **https://stock-screener-five-ecru.vercel.app**.
+2. **Environment variables** (Vercel → Settings → Environment Variables):
+   - `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`
    - `MASSIVE_API_KEY`
-   - `ALPACA_KEY_ID`, `ALPACA_SECRET_KEY` (paper account)
-   - `APP_PASSWORD` (your login), `SESSION_SECRET` (any long random string)
-   - `CRON_SECRET` (any long random string; Vercel sends it to the cron routes)
-   - `NEXT_PUBLIC_VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` (generate once with `npx web-push generate-vapid-keys`)
-3. **Deploy**, then open the site and sign in.
-4. **Backfill history** (about 15 runs of 5 minutes each). Either call it by hand:
-   `curl -H "Authorization: Bearer $CRON_SECRET" https://<app>.vercel.app/api/cron/backfill`
-   until `remaining` is 0, or let the pg_cron job in step 6 handle it.
-5. **Phone:** open the site in Safari → Share → **Add to Home Screen**. Open the app from the Home Screen → Alerts → **Enable notifications**.
-6. **pg_cron** (fundamentals every minute, plus backfill): run `supabase/migrations/0003_pg_cron.sql` once. First replace the URL, and store `CRON_SECRET` in Vault as described in that file.
+   - `ALPACA_KEY_ID`, `ALPACA_SECRET_KEY` (paper account; only needed for options/wheel data)
+   - `APP_PASSWORD`
+
+   Nothing else is needed. The session key is derived from the service-role key, and the cron token and push keys live in `ss_app_secrets`.
+3. **Migration 0003** creates the secrets table and the schedules above.
+4. **Phone:** open the site in Safari → Share → **Add to Home Screen**. Open the app from the Home Screen → Alerts → **Enable notifications**.
 
 ## Development
 
@@ -57,4 +53,4 @@ npm run dev
 npm test                     # wheel scoring, filters, alerts, indicators
 ```
 
-Schema changes live in `supabase/migrations/`. `0001` and `0002` are already applied to `meal-plan-sync`; `0003` runs after the first deploy.
+Schema changes live in `supabase/migrations/`. All migrations are applied to `meal-plan-sync` by hand (Supabase SQL editor or MCP), in order.

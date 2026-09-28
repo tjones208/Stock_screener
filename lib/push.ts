@@ -1,26 +1,22 @@
 import "server-only";
 import webpush from "web-push";
 import { db } from "./db";
-import { env, envOr } from "./env";
+import { vapidKeys } from "./secrets";
 
-let configured = false;
-function setup() {
-  if (configured) return;
-  webpush.setVapidDetails(
-    envOr("VAPID_SUBJECT", "mailto:admin@example.com"),
-    env("NEXT_PUBLIC_VAPID_PUBLIC_KEY"),
-    env("VAPID_PRIVATE_KEY"),
-  );
-  configured = true;
+function subject() {
+  if (process.env.VAPID_SUBJECT) return process.env.VAPID_SUBJECT;
+  const host = process.env.VERCEL_PROJECT_PRODUCTION_URL; // set automatically by Vercel
+  return host ? `https://${host}` : "mailto:admin@localhost";
 }
 
 /** Send one notification to every saved device. Drops subscriptions the browser has revoked. */
 export async function pushAll(title: string, body: string, url = "/alerts"): Promise<number> {
-  if (!process.env.VAPID_PRIVATE_KEY) return 0;
-  setup();
   const { data: subs } = await db().from("ss_push_subscriptions").select("id, endpoint, p256dh, auth");
+  if (!subs?.length) return 0;
+  const k = await vapidKeys();
+  webpush.setVapidDetails(subject(), k.publicKey, k.privateKey);
   let sent = 0;
-  for (const s of subs ?? []) {
+  for (const s of subs) {
     try {
       await webpush.sendNotification(
         { endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } },

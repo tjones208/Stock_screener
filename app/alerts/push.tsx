@@ -25,8 +25,9 @@ export function PushToggle() {
   }, []);
 
   async function enable() {
-    const key = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
-    if (!key) return alert("Push isn't configured yet (NEXT_PUBLIC_VAPID_PUBLIC_KEY missing).");
+    const keyRes = await fetch("/api/push/key");
+    if (!keyRes.ok) return alert("Couldn't load the push key — try again in a moment.");
+    const { publicKey: key } = (await keyRes.json()) as { publicKey: string };
     const perm = await Notification.requestPermission();
     if (perm !== "granted") return setState("denied");
     const reg = await navigator.serviceWorker.ready;
