@@ -137,7 +137,7 @@ export default async function Screener({ searchParams }: { searchParams: Promise
               <div className="muted" style={{ marginTop: 4 }}><b>Entry/exit levels:</b> {LEVEL_RULES[strategy.key]}</div>
             )}
             {strategy.style === "Day trade" && (
-              <div className="muted" style={{ marginTop: 4, fontSize: 12 }}>Built from today&apos;s end-of-day data: this is tomorrow&apos;s watchlist. Entries and exits happen on a live intraday chart.</div>
+              <div className="muted" style={{ marginTop: 4, fontSize: 12 }}>Built from the last close (refreshed ≈ 6am ET): use it as the watchlist for the next session. Entries and exits happen on a live intraday chart.</div>
             )}
             <SizingPanel s={sizing} overnight={overnight} wheel={isWheel} />
           </div>

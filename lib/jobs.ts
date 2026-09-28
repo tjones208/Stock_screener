@@ -118,9 +118,14 @@ export async function backfill(budgetMs = 270_000) {
   return { loaded: done.length, remaining: missing.length - done.length };
 }
 
-/** Nightly: today's bars → indicators → prune. */
+/**
+ * Morning job: load the previous trading day's bars → indicators → prune.
+ * Massive's free plan refuses a day's grouped bars until well after the close
+ * ("Attempted to request today's data before end of day"), so this runs early the next
+ * morning (≈ 6am ET) and loads the prior weekday. Holidays come back empty and are skipped.
+ */
 export async function nightlyEod() {
-  const date = nyToday();
+  const date = weekdaysBack(nyToday(), 7)[0]; // most recent weekday before today (NY time)
   const rows = await ingestDay(date);
   if (rows === 0) return { date, rows, note: "no bars (holiday or not published yet)" };
   const { data: updated, error } = await db().rpc("ss_refresh_indicators", { p_as_of: date });
