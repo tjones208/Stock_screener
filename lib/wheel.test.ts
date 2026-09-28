@@ -54,7 +54,8 @@ const row = (o: Partial<ScreenerRow>): ScreenerRow => ({
   pe: 7, ps: 0.2, pb: 1, eps_ttm: 1.5, revenue_ttm: 1.8e11, revenue_growth_yoy: 4, gross_margin: 8, operating_margin: 3,
   net_margin: 2.5, roe: 10, debt_to_equity: 5, current_ratio: 1.1, free_cash_flow_ttm: null, dividend_yield: null,
   next_earnings_date: null, put_contract: "F261030P00010000", put_expiration: "2026-10-30", put_dte: 32, put_strike: 10,
-  put_mid: 0.2, put_iv: 0.35, put_delta: -0.22, put_oi: 5000, put_spread_pct: 0.05, put_annual_yield: 0.23, wheel_score: 40, ...o,
+  put_mid: 0.2, put_iv: 0.35, put_delta: -0.22, put_oi: 5000, put_spread_pct: 0.05, put_annual_yield: 0.23, wheel_score: 40,
+  vwap: 10.9, range_pos: 60, change_5d: 1, change_20d: 3, nr7: false, inside_day: false, ...o,
 });
 
 test("filters", () => {
@@ -76,4 +77,26 @@ test("alerts", () => {
   const rows = [row({ sma50: 10.5, sma50_prev: 10.3 }), row({ ticker: "G", sma50: 10.5, sma50_prev: 10.3 })];
   const hits = evaluateRules(rules, rows, { watchlists: new Map([[7, new Set(["G"])]]), screens: new Map() });
   assert.deepEqual(hits.map((h) => `${h.rule_id}:${h.ticker}`), ["1:G", "2:F"]);
+});
+
+test("strategy presets only use known filters and columns", async () => {
+  const { STRATEGIES } = await import("./strategies.ts");
+  const keys = new Set<string>();
+  for (const s of STRATEGIES) {
+    assert.ok(!keys.has(s.key), `duplicate key ${s.key}`);
+    keys.add(s.key);
+    // cleanFilters drops anything it doesn't recognise, so a typo would silently vanish.
+    assert.deepEqual(cleanFilters({ strategy: s.key, ...s.filters }), { strategy: s.key, ...s.filters }, s.key);
+  }
+});
+
+test("derived filters: ATR%, $ volume, vs VWAP, sort by derived", () => {
+  const a = row({ ticker: "A", close: 20, atr14: 1, avg_vol20: 3e6, vwap: 19 });   // ATR 5%, $60M, +5.3% vs VWAP
+  const b = row({ ticker: "B", close: 50, atr14: 0.5, avg_vol20: 1e6, vwap: 51 }); // ATR 1%, $50M, −2% vs VWAP
+  assert.deepEqual(applyFilters([a, b], { atr_pct_min: "2" }).map((r) => r.ticker), ["A"]);
+  assert.deepEqual(applyFilters([a, b], { dollar_vol_min: "55000000" }).map((r) => r.ticker), ["A"]);
+  assert.deepEqual(applyFilters([a, b], { pct_from_vwap_max: "0" }).map((r) => r.ticker), ["B"]);
+  assert.deepEqual(applyFilters([a, b], { sort: "atr_pct", dir: "asc" }).map((r) => r.ticker), ["B", "A"]);
+  assert.deepEqual(applyFilters([a, b], { nr7: "1" }), []);
+  assert.deepEqual(applyFilters([a, row({ ticker: "C", nr7: true })], { nr7: "1" }).map((r) => r.ticker), ["C"]);
 });

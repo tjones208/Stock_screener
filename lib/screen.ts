@@ -57,13 +57,24 @@ export type ScreenerRow = {
   put_spread_pct: number | null;
   put_annual_yield: number | null;
   wheel_score: number | null;
+  vwap: number | null;
+  range_pos: number | null;
+  change_5d: number | null;
+  change_20d: number | null;
+  nr7: boolean | null;
+  inside_day: boolean | null;
 };
 
+export const GROUPS = ["Price & volume", "Day trading", "Technical", "Fundamental", "Wheel"] as const;
+
 export type NumericField = {
-  key: keyof ScreenerRow;
+  /** A ScreenerRow column, or a derived key computed by `compute`. Used as the URL filter prefix. */
+  key: string;
   label: string;
-  group: "Price & volume" | "Technical" | "Fundamental" | "Wheel";
+  group: (typeof GROUPS)[number];
   unit?: string;
+  /** Derived value (not stored in the database). */
+  compute?: (r: ScreenerRow) => number | null;
   /** Multiply the stored value by this for display/filter input (e.g. 100 for fractions shown as %). */
   scale?: number;
   /** Absolute value before comparing (delta). */
@@ -76,10 +87,25 @@ export const NUMERIC_FIELDS: NumericField[] = [
   { key: "gap_pct", label: "Gap at open", group: "Price & volume", unit: "%" },
   { key: "avg_vol20", label: "Avg volume (20d)", group: "Price & volume" },
   { key: "vol_ratio", label: "Volume vs avg", group: "Price & volume", unit: "×" },
+  { key: "dollar_vol", label: "Avg $ volume (20d)", group: "Price & volume", unit: "$",
+    compute: (r) => (r.avg_vol20 != null && r.close != null ? r.avg_vol20 * r.close : null) },
   { key: "market_cap", label: "Market cap", group: "Price & volume", unit: "$" },
+  { key: "atr_pct", label: "ATR % of price", group: "Day trading", unit: "%",
+    compute: (r) => (r.atr14 != null && r.close ? (r.atr14 / r.close) * 100 : null) },
+  { key: "gap_abs", label: "Gap size (up or down)", group: "Day trading", unit: "%",
+    compute: (r) => (r.gap_pct == null ? null : Math.abs(r.gap_pct)) },
+  { key: "pct_from_vwap", label: "Close vs VWAP", group: "Day trading", unit: "%",
+    compute: (r) => (r.close != null && r.vwap ? ((r.close - r.vwap) / r.vwap) * 100 : null) },
+  { key: "range_pos", label: "Close in day's range (0 low–100 high)", group: "Day trading", unit: "%" },
   { key: "rsi14", label: "RSI (14)", group: "Technical" },
   { key: "hv30", label: "Hist. volatility (30d)", group: "Technical", unit: "%", scale: 100 },
   { key: "atr14", label: "ATR (14)", group: "Technical", unit: "$" },
+  { key: "change_5d", label: "Change 5 days", group: "Technical", unit: "%" },
+  { key: "change_20d", label: "Change 20 days", group: "Technical", unit: "%" },
+  { key: "pct_from_sma20", label: "Close vs SMA 20", group: "Technical", unit: "%",
+    compute: (r) => (r.close != null && r.sma20 ? ((r.close - r.sma20) / r.sma20) * 100 : null) },
+  { key: "pct_from_sma50", label: "Close vs SMA 50", group: "Technical", unit: "%",
+    compute: (r) => (r.close != null && r.sma50 ? ((r.close - r.sma50) / r.sma50) * 100 : null) },
   { key: "pct_from_high", label: "From 52w high", group: "Technical", unit: "%" },
   { key: "pct_from_low", label: "From 52w low", group: "Technical", unit: "%" },
   { key: "pe", label: "P/E", group: "Fundamental" },
@@ -110,6 +136,10 @@ export const BOOL_FILTERS = {
   below_sma200: { label: "Price below SMA 200", test: (r: ScreenerRow) => gt(r.sma200, r.close) },
   sma50_above_sma200: { label: "SMA 50 above SMA 200", test: (r: ScreenerRow) => gt(r.sma50, r.sma200) },
   ema9_above_ema21: { label: "EMA 9 above EMA 21", test: (r: ScreenerRow) => gt(r.ema9, r.ema21) },
+  above_vwap: { label: "Closed above VWAP", test: (r: ScreenerRow) => gt(r.close, r.vwap) },
+  below_vwap: { label: "Closed below VWAP", test: (r: ScreenerRow) => gt(r.vwap, r.close) },
+  nr7: { label: "NR7 (narrowest range in 7 days)", test: (r: ScreenerRow) => r.nr7 === true },
+  inside_day: { label: "Inside day", test: (r: ScreenerRow) => r.inside_day === true },
   golden_cross: { label: "Golden cross today", test: goldenCross },
   death_cross: { label: "Death cross today", test: deathCross },
   near_52w_high: { label: "Within 3% of 52w high", test: (r: ScreenerRow) => (r.pct_from_high ?? -99) >= -3 },
@@ -145,7 +175,7 @@ function daysUntil(iso: string) {
 }
 
 export function displayValue(f: NumericField, r: ScreenerRow): number | null {
-  const v = r[f.key] as number | null;
+  const v = f.compute ? f.compute(r) : ((r[f.key as keyof ScreenerRow] as number | null) ?? null);
   if (v == null) return null;
   const x = f.abs ? Math.abs(v) : v;
   return x * (f.scale ?? 1);
@@ -175,10 +205,10 @@ export function matches(r: ScreenerRow, filters: Filters): boolean {
 
 export function applyFilters(rows: ScreenerRow[], filters: Filters): ScreenerRow[] {
   const out = rows.filter((r) => matches(r, filters));
-  const sort = (filters.sort || "wheel_score") as keyof ScreenerRow;
   const dir = filters.dir === "asc" ? 1 : -1;
+  const get = sortGetter(filters.sort || "wheel_score");
   return out.sort((a, b) => {
-    const av = a[sort], bv = b[sort];
+    const av = get(a), bv = get(b);
     if (av == null && bv == null) return a.ticker.localeCompare(b.ticker);
     if (av == null) return 1;
     if (bv == null) return -1;
@@ -187,9 +217,18 @@ export function applyFilters(rows: ScreenerRow[], filters: Filters): ScreenerRow
   });
 }
 
+const FIELD_BY_KEY = new Map(NUMERIC_FIELDS.map((f) => [f.key, f]));
+
+/** Value used for sorting by `key`: derived fields are computed, stored columns read directly. */
+export function sortGetter(key: string): (r: ScreenerRow) => unknown {
+  const f = FIELD_BY_KEY.get(key);
+  if (f?.compute) return (r) => f.compute!(r);
+  return (r) => r[key as keyof ScreenerRow];
+}
+
 /** Keep only filter keys we understand (from URL params or saved screens). */
 export function cleanFilters(input: Record<string, string | string[] | undefined>): Filters {
-  const allowed = new Set<string>(["sector", "type", "q", "sort", "dir", ...Object.keys(BOOL_FILTERS)]);
+  const allowed = new Set<string>(["sector", "type", "q", "sort", "dir", "strategy", ...Object.keys(BOOL_FILTERS)]);
   for (const f of NUMERIC_FIELDS) {
     allowed.add(`${f.key}_min`);
     allowed.add(`${f.key}_max`);
