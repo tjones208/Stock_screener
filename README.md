@@ -27,7 +27,8 @@ Earnings dates and dividend yield aren't available on the free tiers. Those colu
 
 | Job | When | What |
 |---|---|---|
-| `ss-eod` | Tue–Sat 10:05 (≈ 6am ET) | Load the **previous** trading day's bars → recompute indicators → prune old bars. Massive's free plan won't serve a day's bars until well after the close, so this runs the next morning. Tuesdays also refresh the ticker list. |
+| `ss-eod` | Tue–Sat 10:05 (≈ 6am ET) | Load the **previous** trading day's bars → recompute indicators → prune old bars. Massive's free plan won't serve a day's bars until well after the close, so this runs the next morning. |
+| `ss-tickers` | Sun 12:05 | Refresh the ticker list and S&P 500 membership (~3 min at the free rate limit). |
 | `ss-options` | Tue–Sat 10:25 (≈ 6:25am ET) | Scan put chains (top 150 liquid names under $50, plus watchlists), then evaluate alerts and send push before the open. |
 | `ss-fundamentals` | every minute | 2 tickers per run. Waits until the backfill is done. |
 | `ss-backfill` | every 6 min | Loads about 20 missing days per run, up to 400 days back. Once history is complete it does nothing. |
