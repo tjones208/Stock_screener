@@ -87,11 +87,11 @@ export const STRATEGIES: Strategy[] = [
     key: "momentum",
     name: "Momentum — 52-week high breakout",
     style: "Swing",
-    summary: "Up ≥ 10% in 20 days, within 3% of a 52-week high, 50-day above 200-day, on above-average volume.",
+    summary: "Up ≥ 10% in 20 days, within 3% of a 52-week high, with the 50-day above the 200-day. Check the RVOL column for volume confirmation.",
     playbook: "Buy strength through the high or the first pullback to the 9/21 EMA; trail a stop under the 21 EMA.",
     filters: {
       close_min: "5", avg_vol20_min: "500000",
-      near_52w_high: "1", sma50_above_sma200: "1", vol_ratio_min: "1.5", change_20d_min: "10",
+      near_52w_high: "1", sma50_above_sma200: "1", change_20d_min: "10",
       sort: "change_20d", dir: "desc",
     },
     columns: ["close", "change_pct", "change_20d", "pct_from_high", "vol_ratio", "rsi14", "atr_pct"],

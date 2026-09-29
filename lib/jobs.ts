@@ -114,8 +114,14 @@ export async function backfill(budgetMs = 270_000) {
     await ingestDay(d, types, watch);
     done.push(d);
   }
-  if (done.length) await db().rpc("ss_refresh_indicators");
-  return { loaded: done.length, remaining: missing.length - done.length };
+  let indicators: number | null = null;
+  if (done.length) {
+    // Must not fail silently: if this errors (e.g. a statement timeout) the whole snapshot goes stale.
+    const { data, error } = await db().rpc("ss_refresh_indicators");
+    if (error) throw new Error(`ss_refresh_indicators: ${error.message}`);
+    indicators = data as number;
+  }
+  return { loaded: done.length, remaining: missing.length - done.length, indicators };
 }
 
 /**
@@ -129,9 +135,9 @@ export async function nightlyEod() {
   const rows = await ingestDay(date);
   if (rows === 0) return { date, rows, note: "no bars (holiday or not published yet)" };
   const { data: updated, error } = await db().rpc("ss_refresh_indicators", { p_as_of: date });
-  if (error) throw new Error(error.message);
-  const { data: pruned } = await db().rpc("ss_prune_bars", { p_days: HISTORY_DAYS });
-  return { date, rows, indicators: updated, pruned };
+  if (error) throw new Error(`ss_refresh_indicators: ${error.message}`);
+  const { data: pruned, error: pruneError } = await db().rpc("ss_prune_bars", { p_days: HISTORY_DAYS });
+  return { date, rows, indicators: updated, pruned, ...(pruneError ? { pruneError: pruneError.message } : {}) };
 }
 
 // ───────────── Options scan ─────────────
