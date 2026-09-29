@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseOcc, rankPuts, scorePut, type RawPut } from "./wheel.ts";
 import { emaSeries, smaSeries, wilderRsi } from "./indicators.ts";
-import { applyFilters, cleanFilters, earningsStatus, earningsWithin, pullbackConfirmation, reversalPattern, supportTest, tradingDaysBetween, type ScreenerRow } from "./screen.ts";
+import { applyFilters, cleanFilters, dbConditions, earningsStatus, earningsWithin, pullbackConfirmation, reversalPattern, supportTest, tradingDaysBetween, type ScreenerRow } from "./screen.ts";
 import { evaluateRules, type AlertRule } from "./alerts.ts";
 
 test("parseOcc", () => {
@@ -353,4 +353,15 @@ test("pullback logic fixes: multi-day test, RSI over the pullback, reclaim, ETFs
   // 4) ETFs excluded, ADRs kept.
   const rows = [row({ ticker: "SSO", type: "ETF" }), row({ ticker: "UGP", type: "ADRC" }), row({ ticker: "U", type: "CS" })];
   assert.deepEqual(applyFilters(rows, { exclude_etfs: "1", sort: "ticker", dir: "asc" }).map((r) => r.ticker), ["U", "UGP"]);
+});
+
+test("dbConditions pushes only plain column filters", () => {
+  const c = dbConditions({ close_min: "5", rsi14_max: "30", atr_pct_max: "12", gap_abs_min: "2", sector: "Energy", sp500: "1", has_put: "1", q: "AA", exclude_etfs: "1" });
+  assert.deepEqual(c, [
+    { op: "gte", col: "close", value: 5 },
+    { op: "lte", col: "rsi14", value: 30 },
+    { op: "eq", col: "sector", value: "Energy" },
+    { op: "eq", col: "in_sp500", value: true },
+    { op: "notNull", col: "put_contract" },
+  ]);
 });

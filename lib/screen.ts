@@ -360,3 +360,39 @@ export function cleanFilters(input: Record<string, string | string[] | undefined
   }
   return out;
 }
+
+/** A filter the database can apply before rows are downloaded. */
+export type DbCondition =
+  | { op: "gte" | "lte"; col: keyof ScreenerRow; value: number }
+  | { op: "eq"; col: keyof ScreenerRow; value: string | boolean }
+  | { op: "notNull"; col: keyof ScreenerRow };
+
+/**
+ * The subset of `filters` that maps 1:1 onto stored columns, for pushing into the query so only
+ * plausible rows are downloaded. Derived fields, absolute values and text search stay in JS, and
+ * applyFilters() still runs on the result, so the final list is identical either way.
+ */
+export function dbConditions(filters: Filters): DbCondition[] {
+  const out: DbCondition[] = [];
+  for (const f of NUMERIC_FIELDS) {
+    if (f.compute || f.abs) continue;
+    const scale = f.scale ?? 1;
+    for (const [suffix, op] of [["_min", "gte"], ["_max", "lte"]] as const) {
+      const raw = filters[`${f.key}${suffix}`];
+      if (raw === undefined || raw === "") continue;
+      const v = Number(raw);
+      if (Number.isFinite(v)) out.push({ op, col: f.key as keyof ScreenerRow, value: v / scale });
+    }
+  }
+  if (filters.sector) out.push({ op: "eq", col: "sector", value: filters.sector });
+  if (filters.type) out.push({ op: "eq", col: "type", value: filters.type });
+  if (filters.sp500 === "1") out.push({ op: "eq", col: "in_sp500", value: true });
+  if (filters.has_put === "1") out.push({ op: "notNull", col: "put_contract" });
+  return out;
+}
+
+/** Sector names the screener can hold (GICS sectors; SIC-mapped tickers use the same names). */
+export const SECTORS = [
+  "Communication Services", "Consumer Discretionary", "Consumer Staples", "Energy", "Financials",
+  "Health Care", "Industrials", "Information Technology", "Materials", "Real Estate", "Utilities",
+];

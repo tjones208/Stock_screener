@@ -4,7 +4,7 @@ import { dailyRange, financials, groupedDaily, listTickers, tickerDetails, type 
 import { putChain } from "./alpaca";
 import { rankPuts, DEFAULT_WHEEL } from "./wheel";
 import { evaluateRules, type AlertRule } from "./alerts";
-import { cleanFilters, type Filters, type ScreenerRow } from "./screen";
+import { cleanFilters, dbConditions, type Filters, type ScreenerRow } from "./screen";
 import { pushAll } from "./push";
 import { addDays, nyToday, weekdaysBack } from "./dates";
 import { sectorFromSic } from "./sectors";
@@ -264,6 +264,45 @@ export async function scanOptions(budgetMs = 270_000, limit = 150) {
 
 export async function loadScreener(): Promise<ScreenerRow[]> {
   return fetchAll<ScreenerRow>((a, b) => db().from("ss_screener").select("*").order("ticker").range(a, b));
+}
+
+/**
+ * Screener rows for one set of filters: the column filters run in the database, and the pages are
+ * fetched in parallel. The caller still runs applyFilters() for the rules the database can't express.
+ */
+export async function loadScreenerFor(filters: Filters): Promise<ScreenerRow[]> {
+  const conds = dbConditions(filters);
+  const build = <Q extends { gte: Function; lte: Function; eq: Function; not: Function }>(q: Q): Q => {
+    for (const c of conds) {
+      if (c.op === "notNull") q = q.not(c.col, "is", null);
+      else q = (q[c.op] as Function).call(q, c.col, c.value);
+    }
+    return q;
+  };
+  const { count, error } = await build(db().from("ss_screener").select("ticker", { count: "exact", head: true }));
+  if (error) throw new Error(error.message);
+  const PAGE = 1000;
+  const pages = Math.ceil((count ?? 0) / PAGE);
+  const results = await Promise.all(
+    Array.from({ length: pages }, (_, i) =>
+      build(db().from("ss_screener").select("*")).order("ticker").range(i * PAGE, i * PAGE + PAGE - 1),
+    ),
+  );
+  const rows: ScreenerRow[] = [];
+  for (const r of results) {
+    if (r.error) throw new Error(r.error.message);
+    rows.push(...((r.data ?? []) as ScreenerRow[]));
+  }
+  return rows;
+}
+
+/** Latest EOD date and how many tickers it covers (cheap: one indexed lookup + a head count). */
+export async function screenerSummary(): Promise<{ asOf: string | null; tickers: number }> {
+  const { data } = await db().from("ss_indicators").select("as_of").order("as_of", { ascending: false }).limit(1);
+  const asOf = (data?.[0]?.as_of as string | undefined) ?? null;
+  if (!asOf) return { asOf: null, tickers: 0 };
+  const { count } = await db().from("ss_indicators").select("ticker", { count: "exact", head: true }).eq("as_of", asOf);
+  return { asOf, tickers: count ?? 0 };
 }
 
 export async function runAlerts() {

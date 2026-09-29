@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { db } from "@/lib/db";
-import { loadScreener } from "@/lib/jobs";
-import { applyFilters, BOOL_FILTERS, cleanFilters, DEFAULT_FILTERS, displayValue, earningsStatus, GROUPS, NUMERIC_FIELDS, pullbackConfirmation, reversalPattern, supportTest, type Filters, type ScreenerRow } from "@/lib/screen";
+import { loadScreenerFor, screenerSummary } from "@/lib/jobs";
+import { applyFilters, BOOL_FILTERS, cleanFilters, DEFAULT_FILTERS, displayValue, earningsStatus, GROUPS, NUMERIC_FIELDS, SECTORS, pullbackConfirmation, reversalPattern, supportTest, type Filters, type ScreenerRow } from "@/lib/screen";
 import { REGIME_TICKER } from "@/lib/jobs";
 import { meetsMinRR, STRATEGIES, STRATEGY_BY_KEY, strategyGate, type MarketRegime } from "@/lib/strategies";
 import { LEVEL_RULES, levelsFor, type Levels } from "@/lib/levels";
@@ -100,8 +100,12 @@ function qs(f: Filters, patch: Filters = {}) {
 export default async function Screener({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
   const sp = await searchParams;
   const filters = Object.keys(sp).length ? cleanFilters(sp) : DEFAULT_FILTERS;
-  const [rows, { data: screens }, sizing, { data: lists }, { data: items }, jar, { data: regimeRow }] = await Promise.all([
-    loadScreener(),
+  const strategyForGate = filters.strategy ? STRATEGY_BY_KEY.get(filters.strategy) : undefined;
+  // Start the row query right away so it overlaps the other lookups.
+  const rowsPromise = loadScreenerFor(filters);
+  rowsPromise.catch(() => {});
+  const [summary, { data: screens }, sizing, { data: lists }, { data: items }, jar, { data: regimeRow }] = await Promise.all([
+    screenerSummary(),
     db().from("ss_screens").select("id, name, filters").order("name"),
     getSizing(),
     db().from("ss_watchlists").select("id, name").order("sort_order").order("name"),
@@ -113,12 +117,12 @@ export default async function Screener({ searchParams }: { searchParams: Promise
   const wantedList = Number(jar.get(WL_COOKIE)?.value);
   const targetList = lists?.find((l) => l.id === wantedList) ?? lists?.[0];
   const starred = new Set((items ?? []).filter((i) => i.watchlist_id === targetList?.id).map((i) => i.ticker));
-  const strategyForGate = filters.strategy ? STRATEGY_BY_KEY.get(filters.strategy) : undefined;
   const gate = strategyForGate ? strategyGate(strategyForGate, regime) : { ok: true };
-  // A strategy whose market regime isn't met generates no signals at all.
-  const results = gate.ok ? applyFilters(rows, filters) : [];
-  const sectors = [...new Set(rows.map((r) => r.sector).filter(Boolean))].sort() as string[];
-  const asOf = rows.reduce((m, r) => (r.as_of > m ? r.as_of : m), "");
+  // A strategy whose market regime isn't met generates no signals at all, so its rows are ignored.
+  // Column filters run in the database; applyFilters re-checks everything, including derived rules.
+  const results = gate.ok ? applyFilters(await rowsPromise, filters) : [];
+  const sectors = SECTORS;
+  const { asOf, tickers } = summary;
   const activeScreen = screens?.find((s) => qs(cleanFilters(s.filters)) === qs(filters));
   const strategy = filters.strategy ? STRATEGY_BY_KEY.get(filters.strategy) : undefined;
   const cols = (strategy?.columns ?? DEFAULT_COLUMNS).filter((k) => COLUMNS[k]).map((k) => ({ key: k, ...COLUMNS[k] }));
@@ -155,7 +159,7 @@ export default async function Screener({ searchParams }: { searchParams: Promise
     <main>
       <div className="row spread">
         <h1>Screener</h1>
-        <span className="muted">{asOf ? `EOD ${asOf} · ${rows.length} tickers` : "No data yet — run the backfill"}</span>
+        <span className="muted">{asOf ? `EOD ${asOf} · ${tickers} tickers` : "No data yet — run the backfill"}</span>
       </div>
 
       {!!screens?.length && (
@@ -193,9 +197,9 @@ export default async function Screener({ searchParams }: { searchParams: Promise
         )}
       </div>
 
-      <details className="panel" open={!rows.length ? false : undefined}>
+      <details className="panel" open={!tickers ? false : undefined}>
         <summary>Filters ({Object.keys(filters).filter((k) => k !== "sort" && k !== "dir").length} active)</summary>
-        <form method="get">
+        <form method="get" key={qs(filters)}>
           <div className="filters">
             <label>
               Search
