@@ -69,6 +69,11 @@ export type ScreenerRow = {
   sma10: number | null;
   prev_open: number | null;
   prev_close: number | null;
+  ema20: number | null;
+  ema20_5d: number | null;
+  swing_low5: number | null;
+  swing_high20: number | null;
+  resistance60: number | null;
 };
 
 export const GROUPS = ["Price & volume", "Day trading", "Technical", "Fundamental", "Wheel"] as const;
@@ -108,6 +113,8 @@ export const NUMERIC_FIELDS: NumericField[] = [
   { key: "atr14", label: "ATR (14)", group: "Technical", unit: "$" },
   { key: "change_5d", label: "Change 5 days", group: "Technical", unit: "%" },
   { key: "change_20d", label: "Change 20 days", group: "Technical", unit: "%" },
+  { key: "pct_from_ema20", label: "Close vs EMA 20", group: "Technical", unit: "%",
+    compute: (r) => (r.close != null && r.ema20 ? ((r.close - r.ema20) / r.ema20) * 100 : null) },
   { key: "pct_from_sma10", label: "Close vs SMA 10", group: "Technical", unit: "%",
     compute: (r) => (r.close != null && r.sma10 ? ((r.close - r.sma10) / r.sma10) * 100 : null) },
   { key: "pct_from_sma20", label: "Close vs SMA 20", group: "Technical", unit: "%",
@@ -155,6 +162,10 @@ export const BOOL_FILTERS = {
   has_put: { label: "Has a wheel-eligible put", test: (r: ScreenerRow) => r.put_contract != null },
   sp500: { label: "S&P 500 only", test: (r: ScreenerRow) => r.in_sp500 },
   green_close: { label: "Green close (close > open)", test: (r: ScreenerRow) => gt(r.close, r.day_open) },
+  ema20_above_sma50: { label: "EMA 20 above SMA 50", test: (r: ScreenerRow) => gt(r.ema20, r.sma50) },
+  ema20_rising: { label: "EMA 20 rising (vs 5 days ago)", test: (r: ScreenerRow) => gt(r.ema20, r.ema20_5d) },
+  pullback_support: { label: "Pullback tested support (EMA 20, SMA 50 or breakout level)", test: (r: ScreenerRow) => supportTest(r) != null },
+  pullback_confirm: { label: "Pullback confirmation (hammer, engulfing or EMA 20 reclaim)", test: (r: ScreenerRow) => pullbackConfirmation(r) != null },
   bullish_reversal: { label: "Bullish reversal candle (green, hammer or engulfing)", test: (r: ScreenerRow) => reversalPattern(r) != null },
   no_earnings_5d: {
     label: "No earnings in next 5 trading days",
@@ -223,13 +234,55 @@ export function earningsStatus(r: ScreenerRow): "unknown" | "clear" | "soon" {
  *  - green:     close > open
  */
 export function reversalPattern(r: ScreenerRow): "engulfing" | "hammer" | "green" | null {
-  const { day_open: o, day_high: h, day_low: l, close: c, prev_open: po, prev_close: pc } = r;
-  if (o == null || h == null || l == null || c == null) return null;
-  if (po != null && pc != null && pc < po && c > o && o <= pc && c >= po) return "engulfing";
+  if (isEngulfing(r)) return "engulfing";
+  if (isHammer(r)) return "hammer";
+  if (r.close != null && r.day_open != null && r.close > r.day_open) return "green";
+  return null;
+}
+
+/** Prior day red, today green, opened at/below the prior close and closed at/above the prior open. */
+export function isEngulfing(r: ScreenerRow): boolean {
+  const { day_open: o, close: c, prev_open: po, prev_close: pc } = r;
+  return o != null && c != null && po != null && pc != null && pc < po && c > o && o <= pc && c >= po;
+}
+
+/** Lower wick ≥ 2× the body, upper wick ≤ the body, close in the top half of the day's range. */
+export function isHammer(r: ScreenerRow): boolean {
+  const { day_open: o, day_high: h, day_low: l, close: c } = r;
+  if (o == null || h == null || l == null || c == null) return false;
   const range = h - l;
   const body = Math.abs(c - o);
-  if (range > 0 && Math.min(o, c) - l >= 2 * body && h - Math.max(o, c) <= body && (c - l) / range >= 0.5) return "hammer";
-  if (c > o) return "green";
+  return range > 0 && Math.min(o, c) - l >= 2 * body && h - Math.max(o, c) <= body && (c - l) / range >= 0.5;
+}
+
+/** Within this many ATRs counts as "testing" a support level. */
+export const SUPPORT_TOLERANCE_ATR = 0.25;
+
+/**
+ * Which support the day's pullback tested: the low reached within 0.25 ATR of the level and the
+ * close held no more than 0.25 ATR below it. Checked nearest-first: EMA 20, SMA 50, then the prior
+ * breakout level (the 21–60-day high, only if the last 20 days actually broke above it).
+ */
+export function supportTest(r: ScreenerRow): "EMA 20" | "SMA 50" | "breakout level" | null {
+  const { day_low: lo, close: c, atr14: atr } = r;
+  if (lo == null || c == null || atr == null || !(atr > 0)) return null;
+  const tol = SUPPORT_TOLERANCE_ATR * atr;
+  const tests = (level: number | null) => level != null && lo <= level + tol && c >= level - tol;
+  if (tests(r.ema20)) return "EMA 20";
+  if (tests(r.sma50)) return "SMA 50";
+  if (r.resistance60 != null && r.swing_high20 != null && r.swing_high20 > r.resistance60 && tests(r.resistance60)) return "breakout level";
+  return null;
+}
+
+/**
+ * Daily bullish confirmation for a pullback (the 1-hour chart isn't available): a hammer, a bullish
+ * engulfing, or a green candle that dipped to/below the EMA 20 and closed back above it.
+ */
+export function pullbackConfirmation(r: ScreenerRow): "engulfing" | "hammer" | "EMA 20 reclaim" | null {
+  if (isEngulfing(r)) return "engulfing";
+  if (isHammer(r)) return "hammer";
+  const { day_open: o, day_low: lo, close: c, ema20 } = r;
+  if (o != null && lo != null && c != null && ema20 != null && c > o && lo <= ema20 && c > ema20) return "EMA 20 reclaim";
   return null;
 }
 

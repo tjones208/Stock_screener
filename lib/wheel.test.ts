@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseOcc, rankPuts, scorePut, type RawPut } from "./wheel.ts";
 import { emaSeries, smaSeries, wilderRsi } from "./indicators.ts";
-import { applyFilters, cleanFilters, earningsStatus, earningsWithin, reversalPattern, tradingDaysBetween, type ScreenerRow } from "./screen.ts";
+import { applyFilters, cleanFilters, earningsStatus, earningsWithin, pullbackConfirmation, reversalPattern, supportTest, tradingDaysBetween, type ScreenerRow } from "./screen.ts";
 import { evaluateRules, type AlertRule } from "./alerts.ts";
 
 test("parseOcc", () => {
@@ -56,7 +56,8 @@ const row = (o: Partial<ScreenerRow>): ScreenerRow => ({
   next_earnings_date: null, put_contract: "F261030P00010000", put_expiration: "2026-10-30", put_dte: 32, put_strike: 10,
   put_mid: 0.2, put_iv: 0.35, put_delta: -0.22, put_oi: 5000, put_spread_pct: 0.05, put_annual_yield: 0.23, wheel_score: 40,
   vwap: 10.9, range_pos: 60, change_5d: 1, change_20d: 3, nr7: false, inside_day: false,
-  day_open: 10.8, day_high: 11.2, day_low: 10.7, sma10: 11.3, prev_open: 11.1, prev_close: 10.9, ...o,
+  day_open: 10.8, day_high: 11.2, day_low: 10.7, sma10: 11.3, prev_open: 11.1, prev_close: 10.9,
+  ema20: 10.9, ema20_5d: 10.8, swing_low5: 10.6, swing_high20: 12.2, resistance60: 11.5, ...o,
 });
 
 test("filters", () => {
@@ -253,4 +254,64 @@ test("ATR% limit replaces the 20% stop rule", async () => {
   assert.ok(levelsFor("oversold", ok));
   assert.equal(levelsFor("oversold", wild), null);
   assert.equal(levelsFor("orb", wild), null);
+});
+
+// Real rows from the 2026-09-25 snapshot.
+const GRDN = {
+  ticker: "GRDN", as_of: "2026-09-25", close: 41.21, avg_vol20: 699_839, vol_ratio: 1.02969, sma50: 40.7866, sma200: 36.8559,
+  rsi14: 45.6614, atr14: 1.98213, day_open: 41.7, day_high: 42.34, day_low: 41.19, prev_open: 43.09, prev_close: 41.79,
+  ema20: 42.6965, ema20_5d: 42.6027, swing_low5: 41.19, swing_high20: 48.33, resistance60: 47.02,
+};
+const LILAK = {
+  ticker: "LILAK", close: 8.49, atr14: 0.272786, day_open: 8.53, day_high: 8.605, day_low: 8.42, prev_open: 8.44, prev_close: 8.55,
+  sma50: 8.3216, ema20: 8.56363, ema20_5d: 8.55229, swing_low5: 8.34, swing_high20: 8.915, resistance60: 8.8394,
+};
+
+test("pullback: support test and confirmation", () => {
+  // GRDN's low 41.19 is within 0.25 ATR (0.50) of the 50 SMA (40.79) and it closed above it.
+  assert.equal(supportTest(row(GRDN)), "SMA 50");
+  // LILAK touched the 20 EMA zone but closed 8.49 < 8.5636 − 0.068 → not a hold.
+  assert.equal(supportTest(row(LILAK)), null);
+  // Breakout-level retest counts only if the stock broke above it in the last 20 days.
+  const retest = row({ close: 50.3, atr14: 1, day_low: 49.9, ema20: 53, sma50: 45, resistance60: 50, swing_high20: 55 });
+  assert.equal(supportTest(retest), "breakout level");
+  assert.equal(supportTest(row({ ...retest, swing_high20: 49 })), null);
+
+  assert.equal(pullbackConfirmation(row(GRDN)), null); // red candle near its low
+  // Green candle that dipped below the 20 EMA (10.9) and closed back above it.
+  assert.equal(pullbackConfirmation(row({ day_open: 10.8, day_low: 10.75, close: 11.05, day_high: 11.3, ema20: 10.9, prev_open: 10.9, prev_close: 11.0 })), "EMA 20 reclaim");
+  // Green but never touched the EMA → not a reclaim.
+  assert.equal(pullbackConfirmation(row({ day_open: 11.0, day_low: 10.95, close: 11.2, day_high: 11.4, ema20: 10.9, prev_open: 11.3, prev_close: 11.1 })), null);
+});
+
+test("pullback plan + sizing: GRDN 2026-09-25 with $120k", async () => {
+  const { levelsFor } = await import("./levels.ts");
+  const { sizePosition, normalizeSizing } = await import("./sizing.ts");
+  const { STRATEGY_BY_KEY, meetsMinRR } = await import("./strategies.ts");
+  const pb = STRATEGY_BY_KEY.get("pullback")!;
+  const l = levelsFor("pullback", row(GRDN))!;
+  assert.deepEqual(
+    [l.entry, l.limit, l.stop, l.target, l.rr, l.rrWorst, l.sizingRisk, l.scaleOutPct, l.trail],
+    [42.35, 42.85, 40.2, 48.33, 2.8, 2.1, 2.65, 50, { label: "EMA 20", value: 42.7 }],
+  );
+  assert.equal(meetsMinRR(pb, l), true);
+  const z = sizePosition(l, row(GRDN), true, normalizeSizing({ account: 120000 }), pb.sizing)!;
+  // $1,200 ÷ $2.65 (limit − stop) = 452 sh; position at the limit = $19,368; 50% at T1 = 226 × $5.98.
+  assert.deepEqual([z.qty, Math.round(z.position), Math.round(z.risk), Math.round(z.reward), z.cap], [452, 19368, 1198, 1351, "risk"]);
+  // Risk is capped at 1% even if the user's setting is higher; a lower user setting wins.
+  assert.equal(sizePosition(l, row(GRDN), true, normalizeSizing({ account: 120000, riskPct: 2 }), pb.sizing)!.qty, 452);
+  assert.equal(sizePosition(l, row(GRDN), true, normalizeSizing({ account: 120000, riskPct: 0.5 }), pb.sizing)!.qty, 226);
+
+  // LILAK: T1 8.91 vs buy-stop 8.62 and stop 8.20 → 0.7R → hidden by the 2:1 rule.
+  const lil = levelsFor("pullback", row(LILAK))!;
+  assert.equal(lil.rr, 0.7);
+  assert.equal(meetsMinRR(pb, lil), false);
+  assert.equal(meetsMinRR(STRATEGY_BY_KEY.get("orb")!, lil), true); // no minimum on other strategies
+});
+
+test("pullback preset filters: trend stack and slope", () => {
+  const up = row({ close: 45, sma50: 40, sma200: 35, ema20: 44, ema20_5d: 43 });
+  assert.deepEqual(applyFilters([up], { ema20_above_sma50: "1", ema20_rising: "1" }).length, 1);
+  assert.deepEqual(applyFilters([row({ ...up, ema20_5d: 44.5 })], { ema20_rising: "1" }).length, 0); // falling EMA
+  assert.deepEqual(applyFilters([row({ ...up, ema20: 39 })], { ema20_above_sma50: "1" }).length, 0); // not stacked
 });

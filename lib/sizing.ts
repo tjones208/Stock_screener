@@ -107,9 +107,10 @@ export function sizePosition(
     return { qty, unit: "ct", position: qty * collateral, risk: 0, reward: qty * (l.entry - l.target) * 100, cap: "allocation" };
   }
 
-  // Next-open plans size off the worst allowed fill (top of the open range), so a gap up inside
-  // the range can't push the loss past the budget. Level-based plans use entry − stop.
-  const fill = l.openRange?.high ?? l.entry;
+  // Next-open plans size off the worst allowed fill (top of the open range) and stop-limit plans off
+  // the limit price, so a fill anywhere in the allowed range can't push the loss past the budget.
+  // Level-based plans use entry − stop.
+  const fill = l.limit ?? l.openRange?.high ?? l.entry;
   const perShare = l.sizingRisk ?? Math.abs(l.entry - l.stop);
   if (!(perShare > 0) || !(fill > 0)) return null;
   const byRisk = Math.floor((s.account * s.riskPct) / 100 / perShare);
@@ -130,8 +131,8 @@ export function sizePosition(
     unit: "sh",
     position: qty * fill,
     risk: qty * perShare,
-    // Reward at the reference entry (same basis as the R:R column).
-    reward: qty * Math.abs(l.target - l.entry),
+    // Reward at the reference entry (same basis as the R:R column); only the scaled-out part for T1.
+    reward: Math.floor((qty * (l.scaleOutPct ?? 100)) / 100) * Math.abs(l.target - l.entry),
     cap,
     used: s,
   };

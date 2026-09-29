@@ -1,9 +1,9 @@
 import Link from "next/link";
 import { db } from "@/lib/db";
 import { loadScreener } from "@/lib/jobs";
-import { applyFilters, BOOL_FILTERS, cleanFilters, DEFAULT_FILTERS, displayValue, earningsStatus, GROUPS, NUMERIC_FIELDS, reversalPattern, type Filters, type ScreenerRow } from "@/lib/screen";
+import { applyFilters, BOOL_FILTERS, cleanFilters, DEFAULT_FILTERS, displayValue, earningsStatus, GROUPS, NUMERIC_FIELDS, pullbackConfirmation, reversalPattern, supportTest, type Filters, type ScreenerRow } from "@/lib/screen";
 import { REGIME_TICKER } from "@/lib/jobs";
-import { STRATEGIES, STRATEGY_BY_KEY, strategyGate, type MarketRegime } from "@/lib/strategies";
+import { meetsMinRR, STRATEGIES, STRATEGY_BY_KEY, strategyGate, type MarketRegime } from "@/lib/strategies";
 import { LEVEL_RULES, levelsFor, type Levels } from "@/lib/levels";
 import { applyOverrides, sizePosition, type Size, type SizingOverrides, type SizingSettings } from "@/lib/sizing";
 import { getSizing } from "@/lib/settings";
@@ -27,6 +27,7 @@ const atrPct = derived("atr_pct");
 const dollarVol = derived("dollar_vol");
 const fromVwap = derived("pct_from_vwap");
 const fromSma10 = derived("pct_from_sma10");
+const fromEma20 = derived("pct_from_ema20");
 const fromSma20 = derived("pct_from_sma20");
 const fromSma50 = derived("pct_from_sma50");
 const signed = (v: number | null, d = 1) => <span className={signClass(v)}>{pct(v, d)}</span>;
@@ -45,6 +46,15 @@ const COLUMNS: Record<string, Col> = {
   vwap: { label: "VWAP", render: (r) => num(r.vwap) },
   pct_from_vwap: { label: "vs VWAP", render: (r) => signed(fromVwap(r)) },
   pct_from_sma10: { label: "vs SMA10", render: (r) => signed(fromSma10(r)) },
+  pct_from_ema20: { label: "vs EMA20", render: (r) => signed(fromEma20(r)) },
+  support: { label: "Support tested", render: (r) => supportTest(r) ?? <span className="muted">none</span> },
+  confirm: {
+    label: "Confirmation",
+    render: (r) => {
+      const p = pullbackConfirmation(r);
+      return p ? <span className="up">{p}</span> : <span className="muted">none</span>;
+    },
+  },
   pct_from_sma20: { label: "vs SMA20", render: (r) => signed(fromSma20(r)) },
   reversal: {
     label: "Candle",
@@ -114,9 +124,13 @@ export default async function Screener({ searchParams }: { searchParams: Promise
   const sortKey = filters.sort || "wheel_score";
   const levels = new Map<string, Levels | null>(strategy ? results.map((r) => [r.ticker, levelsFor(strategy.key, r)]) : []);
   const side = strategy && (filters.side === "long" || filters.side === "short") ? filters.side : "";
-  const sided = side
+  const bySide = side
     ? results.filter((r) => levels.get(r.ticker)?.side === (side === "long" ? "Long" : "Short"))
     : results;
+  // Strategies with a minimum reward-to-risk drop setups whose plan falls short (or has no plan).
+  const minRR = strategy?.minRR;
+  const sided = strategy && minRR ? bySide.filter((r) => meetsMinRR(strategy, levels.get(r.ticker))) : bySide;
+  const hiddenByRR = bySide.length - sided.length;
   const shown = sided.slice(0, 300);
   const overnight = strategy?.style === "Swing";
   const sizes = new Map<string, Size | null>(
@@ -127,9 +141,12 @@ export default async function Screener({ searchParams }: { searchParams: Promise
   );
   const isWheel = strategy?.key === "wheel";
   const nextOpen = strategy?.execution === "next_open";
+  const stopLimit = strategy?.execution === "stop_limit";
   const levelHeaders = isWheel
     ? ["Trade", "Credit", "Breakeven", "Buy back", "Contracts", "Collateral", "Profit @ target"]
-    : nextOpen
+    : stopLimit
+      ? ["Side", "Buy-stop", "Limit", "Stop", "T1 (sell 50%)", "T2 trail", "R:R to T1", "R:R @ limit", "Risk/sh (@ limit)", "Shares", "Position (@ limit)", "$ Risk", "$ @ T1 (50%)", "Sized by"]
+      : nextOpen
       ? ["Side", "Ref (close)", "Valid T+1 open", "Stop", "Target", "R:R", "R:R @ worst", "Time exit", "Risk/sh (worst)", "Shares", "Position (worst)", "$ Risk", "$ @ Target", "Sized by"]
       : ["Side", "Entry", "Stop", "Target", "R:R", "Risk/sh", "Shares", "Position", "$ Risk", "$ @ Target", "Sized by"];
 
@@ -258,7 +275,10 @@ export default async function Screener({ searchParams }: { searchParams: Promise
       </details>
 
       <div className="row spread">
-        <h2>{sided.length} matches{sided.length > 300 ? " (showing 300)" : ""}</h2>
+        <h2>
+          {sided.length} matches{sided.length > 300 ? " (showing 300)" : ""}
+          {hiddenByRR > 0 && <span className="muted" style={{ fontSize: 13, fontWeight: 400 }}> · {hiddenByRR} hidden: under {minRR}:1 to target</span>}
+        </h2>
         {targetList && <WatchlistTarget lists={lists ?? []} current={targetList.id} />}
       </div>
       <div className="table-wrap">
@@ -302,7 +322,7 @@ export default async function Screener({ searchParams }: { searchParams: Promise
                   </div>
                   <div className="muted" style={{ fontSize: 11, maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis" }}>{r.name}</div>
                 </td>
-                {strategy && <LevelCells l={levels.get(r.ticker) ?? null} size={sizes.get(r.ticker) ?? null} wheel={isWheel} nextOpen={nextOpen} />}
+                {strategy && <LevelCells l={levels.get(r.ticker) ?? null} size={sizes.get(r.ticker) ?? null} wheel={isWheel} nextOpen={nextOpen} stopLimit={stopLimit} />}
                 {cols.map((c) => <td key={c.key}>{c.render(r)}</td>)}
               </tr>
             ))}
@@ -315,8 +335,8 @@ export default async function Screener({ searchParams }: { searchParams: Promise
 
 const usd0 = (v: number) => `$${Math.round(v).toLocaleString("en-US")}`;
 
-function LevelCells({ l, size, wheel, nextOpen }: { l: Levels | null; size: Size | null; wheel: boolean; nextOpen: boolean }) {
-  const n = wheel ? 7 : nextOpen ? 14 : 11;
+function LevelCells({ l, size, wheel, nextOpen, stopLimit }: { l: Levels | null; size: Size | null; wheel: boolean; nextOpen: boolean; stopLimit: boolean }) {
+  const n = wheel ? 7 : nextOpen || stopLimit ? 14 : 11;
   if (!l) return <>{Array.from({ length: n }, (_, i) => <td key={i} className="lvl muted">—</td>)}</>;
   const sizeCells = (count: number, cells: React.ReactNode[]) =>
     size ? cells : Array.from({ length: count }, (_, i) => <td key={`s${i}`} className="lvl muted">—</td>);
@@ -331,6 +351,28 @@ function LevelCells({ l, size, wheel, nextOpen }: { l: Levels | null; size: Size
           <td key="q" className="lvl"><b>{size?.qty}</b></td>,
           <td key="p" className="lvl">{size && usd0(size.position)}</td>,
           <td key="w" className="lvl up">{size && usd0(size.reward)}</td>,
+        ])}
+      </>
+    );
+  }
+  if (stopLimit) {
+    return (
+      <>
+        <td className="lvl up" title={l.how}>{l.side}</td>
+        <td className="lvl"><b>{money(l.entry)}</b></td>
+        <td className="lvl">{money(l.limit)}</td>
+        <td className="lvl down">{money(l.stop)}</td>
+        <td className="lvl up">{money(l.target)}</td>
+        <td className="lvl" title="Exit the remaining half on a daily close below this">{l.trail ? `${l.trail.label} ${money(l.trail.value)}` : "—"}</td>
+        <td className="lvl"><b>{l.rr == null ? "—" : `${l.rr.toFixed(1)}R`}</b></td>
+        <td className="lvl">{l.rrWorst == null ? "—" : `${l.rrWorst.toFixed(1)}R`}</td>
+        <td className="lvl">{money(l.sizingRisk ?? Math.abs(l.entry - l.stop))}</td>
+        {sizeCells(5, [
+          <td key="q" className="lvl"><b>{size?.qty.toLocaleString("en-US")}</b></td>,
+          <td key="p" className="lvl">{size && usd0(size.position)}</td>,
+          <td key="r" className="lvl down">{size && usd0(size.risk)}</td>,
+          <td key="w" className="lvl up">{size && usd0(size.reward)}</td>,
+          <td key="c" className="lvl"><span className="pill">{size?.cap}</span></td>,
         ])}
       </>
     );

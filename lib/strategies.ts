@@ -22,8 +22,13 @@ export type Strategy = {
   requires?: { benchmarkAbove200?: boolean };
   /** Strategy-specific sizing limits. These only ever tighten the user's global settings. */
   sizing?: SizingOverrides;
-  /** "close" = level-based orders placed off today's bar; "next_open" = market-on-open T+1 with a gap band. */
-  execution?: "close" | "next_open";
+  /**
+   * "close" = level-based orders placed off today's bar; "next_open" = market-on-open T+1 with a gap
+   * band; "stop_limit" = buy-stop above the signal bar's high with a limit cap (no fill above it).
+   */
+  execution?: "close" | "next_open" | "stop_limit";
+  /** Hide setups whose plan offers less reward-to-risk than this (to the first target). */
+  minRR?: number;
 };
 
 export const STRATEGIES: Strategy[] = [
@@ -110,15 +115,27 @@ export const STRATEGIES: Strategy[] = [
     key: "pullback",
     name: "Pullback in an uptrend",
     style: "Swing",
-    summary: "Strong trend (above the 200-day, 50 over 200) that has pulled back to within −3%/+2% of the 50-day with RSI cooled to 40–55.",
-    playbook: "Enter on a bounce off the 50-day (e.g. a close back above the prior day's high); stop below the recent swing low.",
+    summary:
+      "Daily uptrend (price above the 50- and 200-day SMA, rising 20 EMA stacked above the 50 SMA) that pulled back to test support " +
+      "(20 EMA, 50 SMA or a prior breakout level) with Wilder RSI cooling to 40–50, then printed a bullish confirmation candle " +
+      "(hammer, engulfing, or a green close back above the 20 EMA) on above-average volume. Only while SPY is above its 200-day.",
+    playbook:
+      "Place a buy-stop just above the confirmation candle's high with a limit 0.25 ATR higher; cancel if it doesn't trigger next session. " +
+      "Sell 50% at T1 (the prior 20-day swing high) and move the stop to breakeven; trail the rest and exit on a daily close below the 20 EMA. " +
+      "Typical hold 3–10 days. The 1-hour execution chart isn't available here (daily data only), so confirmation uses the daily candle.",
     filters: {
       close_min: "5", avg_vol20_min: "500000",
-      above_sma200: "1", sma50_above_sma200: "1",
-      pct_from_sma50_min: "-3", pct_from_sma50_max: "2", rsi14_min: "40", rsi14_max: "55",
-      sort: "rsi14", dir: "asc",
+      above_sma50: "1", above_sma200: "1", ema20_above_sma50: "1", ema20_rising: "1",
+      rsi14_min: "40", rsi14_max: "50",
+      pullback_support: "1", pullback_confirm: "1", vol_ratio_min: "1",
+      sort: "vol_ratio", dir: "desc",
     },
-    columns: ["close", "change_pct", "pct_from_sma50", "rsi14", "change_5d", "pct_from_high", "atr_pct"],
+    columns: ["close", "change_pct", "support", "confirm", "rsi14", "pct_from_ema20", "pct_from_sma50", "vol_ratio", "atr_pct", "earnings"],
+    requires: { benchmarkAbove200: true },
+    // Spec: risk no more than 0.5–1.0% per trade → cap at 1%; a lower user setting wins.
+    sizing: { riskPct: 1 },
+    execution: "stop_limit",
+    minRR: 2,
   },
   {
     key: "oversold",
@@ -149,6 +166,12 @@ export const STRATEGY_BY_KEY = new Map(STRATEGIES.map((s) => [s.key, s]));
 /** Screener query string for a preset (includes strategy=key so columns and notes follow along). */
 export function strategyQuery(s: Strategy): string {
   return new URLSearchParams({ strategy: s.key, ...s.filters }).toString();
+}
+
+/** True when a setup's plan clears the strategy's minimum reward-to-risk (strategies without one always pass). */
+export function meetsMinRR(s: Strategy, l: { rr: number | null } | null | undefined): boolean {
+  if (!s.minRR) return true;
+  return l?.rr != null && l.rr >= s.minRR;
 }
 
 /**

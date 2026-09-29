@@ -26,6 +26,12 @@ export type Levels = {
   rrWorst?: number | null;
   /** Hard time stop: exit at the close of this trading day if neither stop nor target hit. */
   timeExit?: { days: number; date: string };
+  /** Stop-limit entries: `entry` is the buy-stop trigger and this is the highest acceptable fill. */
+  limit?: number;
+  /** Percent of the position sold at `target` (T1); the rest is managed by `trail`. */
+  scaleOutPct?: number;
+  /** Runner exit: a daily close below this moving average (current value shown). */
+  trail?: { label: string; value: number };
 };
 
 /** One-line description of each strategy's level rules, shown under the playbook. */
@@ -36,7 +42,11 @@ export const LEVEL_RULES: Record<string, string> = {
   gap_go: "Buy a break of today's high. Stop at the higher of today's midpoint or entry − 1 ATR. Target 2R.",
   squeeze: "Buy a break of today's (narrow) high, stop just under today's low, target 2R.",
   momentum: "Buy a break of the 52-week high (or today's high if higher). Stop 1.5 ATR below, target 2R.",
-  pullback: "Buy a break of today's high to confirm the bounce. Stop 0.25 ATR under today's low, target 2R.",
+  pullback:
+    "Buy-stop 1¢ above the confirmation candle's high, limit 0.25 ATR above that (no fill higher). " +
+    "Stop 0.5 ATR below the 5-day swing low. T1 = the prior 20-day swing high: sell 50%, then move the stop to breakeven. " +
+    "T2 = trail the other 50% and exit on a daily close below the 20 EMA. Setups under 2:1 reward-to-risk to T1 are hidden. " +
+    "Size uses the limit price, the worst fill.",
   oversold:
     "Market-on-open buy on the next session (T+1), only if it opens between close − 1 ATR and close + 0.5 ATR; skip the trade otherwise. " +
     "Stop at close − 1.5 ATR (a fixed price). Target the 10-day average, or entry + 1.5 ATR if the 10-day is below the entry. " +
@@ -130,10 +140,24 @@ export function levelsFor(strategy: string, r: ScreenerRow): Levels | null {
       return plan("Long", entry, stop, twoR("Long", entry, stop), "Buy-stop above the 52-week high");
     }
     case "pullback": {
-      if (hi == null || lo == null) return null;
-      const entry = hi + TICK;
-      const stop = lo - 0.25 * atr;
-      return plan("Long", entry, stop, twoR("Long", entry, stop), "Buy-stop above today's high");
+      if (hi == null || r.swing_low5 == null || r.swing_high20 == null || r.ema20 == null) return null;
+      const entry = hi + TICK; // buy-stop above the confirmation candle
+      const limit = entry + 0.25 * atr; // stop-limit cap: no fill above this
+      const stop = r.swing_low5 - 0.5 * atr; // below the pullback swing low
+      const t1 = r.swing_high20; // prior swing high
+      const base = plan("Long", entry, stop, t1, "");
+      if (!base) return null; // T1 not above the entry → no room to the prior high
+      const worstReward = t1 - limit;
+      const worstRisk = limit - stop;
+      return {
+        ...base,
+        how: `Buy-stop $${entry.toFixed(2)}, limit $${limit.toFixed(2)} next session; cancel if not triggered`,
+        limit: round(limit),
+        sizingRisk: round(worstRisk),
+        rrWorst: worstReward > 0 ? Math.round((worstReward / worstRisk) * 10) / 10 : null,
+        scaleOutPct: 50,
+        trail: { label: "EMA 20", value: round(r.ema20) },
+      };
     }
     case "oversold": {
       // Signal is known only after the close, so execution is the next open (T+1), not today's close.
