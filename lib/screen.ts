@@ -74,6 +74,7 @@ export type ScreenerRow = {
   swing_low5: number | null;
   swing_high20: number | null;
   resistance60: number | null;
+  rsi_min5: number | null;
 };
 
 export const GROUPS = ["Price & volume", "Day trading", "Technical", "Fundamental", "Wheel"] as const;
@@ -109,6 +110,7 @@ export const NUMERIC_FIELDS: NumericField[] = [
     compute: (r) => (r.close != null && r.vwap ? ((r.close - r.vwap) / r.vwap) * 100 : null) },
   { key: "range_pos", label: "Close in day's range (0 low–100 high)", group: "Day trading", unit: "%" },
   { key: "rsi14", label: "RSI (14)", group: "Technical" },
+  { key: "rsi_min5", label: "Lowest RSI (last 5 days)", group: "Technical" },
   { key: "hv30", label: "Hist. volatility (30d)", group: "Technical", unit: "%", scale: 100 },
   { key: "atr14", label: "ATR (14)", group: "Technical", unit: "$" },
   { key: "change_5d", label: "Change 5 days", group: "Technical", unit: "%" },
@@ -164,7 +166,8 @@ export const BOOL_FILTERS = {
   green_close: { label: "Green close (close > open)", test: (r: ScreenerRow) => gt(r.close, r.day_open) },
   ema20_above_sma50: { label: "EMA 20 above SMA 50", test: (r: ScreenerRow) => gt(r.ema20, r.sma50) },
   ema20_rising: { label: "EMA 20 rising (vs 5 days ago)", test: (r: ScreenerRow) => gt(r.ema20, r.ema20_5d) },
-  pullback_support: { label: "Pullback tested support (EMA 20, SMA 50 or breakout level)", test: (r: ScreenerRow) => supportTest(r) != null },
+  exclude_etfs: { label: "Exclude ETFs (stocks and ADRs only)", test: (r: ScreenerRow) => r.type !== "ETF" },
+  pullback_support: { label: "Pullback tested support in the last 5 days (EMA 20, SMA 50 or breakout level)", test: (r: ScreenerRow) => supportTest(r) != null },
   pullback_confirm: { label: "Pullback confirmation (hammer, engulfing or EMA 20 reclaim)", test: (r: ScreenerRow) => pullbackConfirmation(r) != null },
   bullish_reversal: { label: "Bullish reversal candle (green, hammer or engulfing)", test: (r: ScreenerRow) => reversalPattern(r) != null },
   no_earnings_5d: {
@@ -259,12 +262,14 @@ export function isHammer(r: ScreenerRow): boolean {
 export const SUPPORT_TOLERANCE_ATR = 0.25;
 
 /**
- * Which support the day's pullback tested: the low reached within 0.25 ATR of the level and the
- * close held no more than 0.25 ATR below it. Checked nearest-first: EMA 20, SMA 50, then the prior
- * breakout level (the 21–60-day high, only if the last 20 days actually broke above it).
+ * Which support the pullback tested: the pullback's low (lowest low of the last 5 sessions, so the
+ * test can come a day or more before the confirmation candle) reached within 0.25 ATR of the level,
+ * and today's close held no more than 0.25 ATR below it. Checked nearest-first: EMA 20, SMA 50, then
+ * the prior breakout level (the 21–60-day high, only if the last 20 days actually broke above it).
  */
 export function supportTest(r: ScreenerRow): "EMA 20" | "SMA 50" | "breakout level" | null {
-  const { day_low: lo, close: c, atr14: atr } = r;
+  const { close: c, atr14: atr } = r;
+  const lo = r.swing_low5 ?? r.day_low;
   if (lo == null || c == null || atr == null || !(atr > 0)) return null;
   const tol = SUPPORT_TOLERANCE_ATR * atr;
   const tests = (level: number | null) => level != null && lo <= level + tol && c >= level - tol;
@@ -276,13 +281,16 @@ export function supportTest(r: ScreenerRow): "EMA 20" | "SMA 50" | "breakout lev
 
 /**
  * Daily bullish confirmation for a pullback (the 1-hour chart isn't available): a hammer, a bullish
- * engulfing, or a green candle that dipped to/below the EMA 20 and closed back above it.
+ * engulfing, or a green candle that closed back above the EMA 20 after trading below it — either
+ * today's low was at/below it or yesterday closed below it.
  */
 export function pullbackConfirmation(r: ScreenerRow): "engulfing" | "hammer" | "EMA 20 reclaim" | null {
   if (isEngulfing(r)) return "engulfing";
   if (isHammer(r)) return "hammer";
-  const { day_open: o, day_low: lo, close: c, ema20 } = r;
-  if (o != null && lo != null && c != null && ema20 != null && c > o && lo <= ema20 && c > ema20) return "EMA 20 reclaim";
+  const { day_open: o, day_low: lo, close: c, prev_close: pc, ema20 } = r;
+  if (o == null || lo == null || c == null || ema20 == null) return null;
+  const wasBelow = lo <= ema20 || (pc != null && pc < ema20);
+  if (c > o && c > ema20 && wasBelow) return "EMA 20 reclaim";
   return null;
 }
 

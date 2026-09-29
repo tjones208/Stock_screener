@@ -40,6 +40,7 @@ const COLUMNS: Record<string, Col> = {
   change_5d: { label: "5d", render: (r) => signed(r.change_5d, 0) },
   change_20d: { label: "20d", render: (r) => signed(r.change_20d, 0) },
   rsi14: { label: "RSI", render: (r) => num(r.rsi14, 0) },
+  rsi_min5: { label: "Low RSI 5d", render: (r) => num(r.rsi_min5, 0) },
   vol_ratio: { label: "RVOL", render: (r) => num(r.vol_ratio, 1) },
   dollar_vol: { label: "$ Vol", render: (r) => big(dollarVol(r)) },
   atr_pct: { label: "ATR%", render: (r) => pct(atrPct(r)) },

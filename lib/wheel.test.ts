@@ -57,7 +57,7 @@ const row = (o: Partial<ScreenerRow>): ScreenerRow => ({
   put_mid: 0.2, put_iv: 0.35, put_delta: -0.22, put_oi: 5000, put_spread_pct: 0.05, put_annual_yield: 0.23, wheel_score: 40,
   vwap: 10.9, range_pos: 60, change_5d: 1, change_20d: 3, nr7: false, inside_day: false,
   day_open: 10.8, day_high: 11.2, day_low: 10.7, sma10: 11.3, prev_open: 11.1, prev_close: 10.9,
-  ema20: 10.9, ema20_5d: 10.8, swing_low5: 10.6, swing_high20: 12.2, resistance60: 11.5, ...o,
+  ema20: 10.9, ema20_5d: 10.8, swing_low5: 10.6, swing_high20: 12.2, resistance60: 11.5, rsi_min5: 45, ...o,
 });
 
 test("filters", () => {
@@ -270,10 +270,12 @@ const LILAK = {
 test("pullback: support test and confirmation", () => {
   // GRDN's low 41.19 is within 0.25 ATR (0.50) of the 50 SMA (40.79) and it closed above it.
   assert.equal(supportTest(row(GRDN)), "SMA 50");
-  // LILAK touched the 20 EMA zone but closed 8.49 < 8.5636 − 0.068 → not a hold.
-  assert.equal(supportTest(row(LILAK)), null);
+  // LILAK's close 8.49 didn't hold the 20 EMA zone (8.5636 − 0.068), but its 5-day low 8.34
+  // tested the 50 SMA (8.32 + 0.068) and it closed above it → SMA 50 support.
+  assert.equal(supportTest(row(LILAK)), "SMA 50");
+  assert.equal(supportTest(row({ ...LILAK, swing_low5: 8.42 })), null); // low never reached either level
   // Breakout-level retest counts only if the stock broke above it in the last 20 days.
-  const retest = row({ close: 50.3, atr14: 1, day_low: 49.9, ema20: 53, sma50: 45, resistance60: 50, swing_high20: 55 });
+  const retest = row({ close: 50.3, atr14: 1, day_low: 49.9, swing_low5: 49.9, ema20: 53, sma50: 45, resistance60: 50, swing_high20: 55 });
   assert.equal(supportTest(retest), "breakout level");
   assert.equal(supportTest(row({ ...retest, swing_high20: 49 })), null);
 
@@ -319,12 +321,36 @@ test("pullback preset filters: trend stack and slope", () => {
 test("screen alerts respect a strategy's regime gate and 2:1 rule", async () => {
   const { evaluateRules } = await import("./alerts.ts");
   // GRDN with a hammer at the 20 EMA (passes every pullback rule, 2.4R) and LILAK with a reclaim (0.7R).
-  const grdn = row({ ...GRDN, close: 42.1, day_open: 41.8, day_low: 40.9, ema20: 42.0, ema20_5d: 41.6, swing_low5: 40.9, rsi14: 47.2, vol_ratio: 1.29, avg_vol20: 699_839 });
-  const lil = row({ ...LILAK, close: 8.6, day_open: 8.5, day_low: 8.5, day_high: 8.62, rsi14: 49.4, vol_ratio: 1.8, avg_vol20: 1_305_800, sma200: 7.5 });
+  const grdn = row({ ...GRDN, close: 42.1, day_open: 41.8, day_low: 40.9, ema20: 42.0, ema20_5d: 41.6, swing_low5: 40.9, rsi14: 47.2, rsi_min5: 44, vol_ratio: 1.29, avg_vol20: 699_839 });
+  const lil = row({ ...LILAK, close: 8.6, day_open: 8.5, day_low: 8.5, day_high: 8.62, rsi14: 49.4, rsi_min5: 46, vol_ratio: 1.8, avg_vol20: 1_305_800, sma200: 7.5 });
   const { STRATEGY_BY_KEY, strategyQuery } = await import("./strategies.ts");
   const f = Object.fromEntries(new URLSearchParams(strategyQuery(STRATEGY_BY_KEY.get("pullback")!)));
   const rule = { id: 9, name: "Pullback", kind: "screen_match" as const, ticker: null, screen_id: 1, watchlist_id: null, params: {}, enabled: true };
   const ctx = (close: number) => ({ watchlists: new Map(), screens: new Map([[1, f]]), regime: { ticker: "SPY", close, sma200: 700, as_of: "2026-09-25" } });
   assert.deepEqual(evaluateRules([rule], [grdn, lil], ctx(770)).map((h) => h.ticker), ["GRDN"]); // LILAK < 2:1 → no alert
   assert.deepEqual(evaluateRules([rule], [grdn, lil], ctx(650)), []); // SPY below its 200-day → no alerts
+});
+
+test("pullback logic fixes: multi-day test, RSI over the pullback, reclaim, ETFs", async () => {
+  // 1) Support tested earlier in the pullback: today's low (42.6) is above the zone, but the
+  //    5-day low (41.0) touched the 20 EMA (41.2 ± 0.5) and today's close holds above it.
+  const earlier = row({ close: 43.1, atr14: 2, day_low: 42.6, swing_low5: 41.0, ema20: 41.2, sma50: 38, resistance60: 50, swing_high20: 47 });
+  assert.equal(supportTest(earlier), "EMA 20");
+  assert.equal(supportTest(row({ ...earlier, swing_low5: 42.6 })), null); // never came down to it
+
+  // 2) RSI rule uses the lowest RSI of the pullback: RSI 55 today after a strong candle still qualifies
+  //    if it dipped to 44 during the pullback; one that dipped to 35 "broke down" and doesn't.
+  const f = { rsi_min5_min: "40", rsi_min5_max: "50" };
+  assert.equal(applyFilters([row({ rsi14: 55, rsi_min5: 44 })], f).length, 1);
+  assert.equal(applyFilters([row({ rsi14: 55, rsi_min5: 35 })], f).length, 0);
+  assert.equal(applyFilters([row({ rsi14: 47, rsi_min5: 52 })], f).length, 0); // never cooled into 40–50
+
+  // 3) Reclaim after closing below the EMA yesterday, even if today's low stayed above it.
+  assert.equal(pullbackConfirmation(row({ prev_close: 10.8, prev_open: 10.85, day_open: 10.95, day_low: 10.92, close: 11.1, day_high: 11.2, ema20: 10.9 })), "EMA 20 reclaim");
+  // Green but was never below the EMA (and not an engulfing: prior day was green) → not a reclaim.
+  assert.equal(pullbackConfirmation(row({ prev_close: 11.0, prev_open: 10.9, day_open: 10.95, day_low: 10.92, close: 11.1, day_high: 11.2, ema20: 10.9 })), null);
+
+  // 4) ETFs excluded, ADRs kept.
+  const rows = [row({ ticker: "SSO", type: "ETF" }), row({ ticker: "UGP", type: "ADRC" }), row({ ticker: "U", type: "CS" })];
+  assert.deepEqual(applyFilters(rows, { exclude_etfs: "1", sort: "ticker", dir: "asc" }).map((r) => r.ticker), ["U", "UGP"]);
 });

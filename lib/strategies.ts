@@ -116,9 +116,10 @@ export const STRATEGIES: Strategy[] = [
     name: "Pullback in an uptrend",
     style: "Swing",
     summary:
-      "Daily uptrend (price above the 50- and 200-day SMA, rising 20 EMA stacked above the 50 SMA) that pulled back to test support " +
-      "(20 EMA, 50 SMA or a prior breakout level) with Wilder RSI cooling to 40–50, then printed a bullish confirmation candle " +
-      "(hammer, engulfing, or a green close back above the 20 EMA) on above-average volume. Only while SPY is above its 200-day.",
+      "Daily uptrend (price above the 50- and 200-day SMA, rising 20 EMA stacked above the 50 SMA) whose pullback in the last 5 sessions " +
+      "tested support (20 EMA, 50 SMA or a prior breakout level) with Wilder RSI cooling into 40–50 without breaking down, then printed a " +
+      "bullish confirmation candle today (hammer, engulfing, or a green close back above the 20 EMA) on above-average volume. " +
+      "Stocks and ADRs only; only while SPY is above its 200-day.",
     playbook:
       "Place a buy-stop just above the confirmation candle's high with a limit 0.25 ATR higher; cancel if it doesn't trigger next session. " +
       "Sell 50% at T1 (the prior 20-day swing high) and move the stop to breakeven; trail the rest and exit on a daily close below the 20 EMA. " +
@@ -126,11 +127,13 @@ export const STRATEGIES: Strategy[] = [
     filters: {
       close_min: "5", avg_vol20_min: "500000",
       above_sma50: "1", above_sma200: "1", ema20_above_sma50: "1", ema20_rising: "1",
-      rsi14_min: "40", rsi14_max: "50",
-      pullback_support: "1", pullback_confirm: "1", vol_ratio_min: "1",
+      // RSI is judged over the pullback (lowest of the last 5 sessions), not on the confirmation day,
+      // when a strong candle can lift it back above 50.
+      rsi_min5_min: "40", rsi_min5_max: "50",
+      pullback_support: "1", pullback_confirm: "1", vol_ratio_min: "1", exclude_etfs: "1",
       sort: "vol_ratio", dir: "desc",
     },
-    columns: ["close", "change_pct", "support", "confirm", "rsi14", "pct_from_ema20", "pct_from_sma50", "vol_ratio", "atr_pct", "earnings"],
+    columns: ["close", "change_pct", "support", "confirm", "rsi_min5", "rsi14", "pct_from_ema20", "pct_from_sma50", "vol_ratio", "atr_pct", "earnings"],
     requires: { benchmarkAbove200: true },
     // Spec: risk no more than 0.5–1.0% per trade → cap at 1%; a lower user setting wins.
     sizing: { riskPct: 1 },
