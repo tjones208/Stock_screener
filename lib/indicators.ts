@@ -30,3 +30,27 @@ export function smaSeries(values: number[], period: number): (number | null)[] {
   }
   return out;
 }
+
+/**
+ * Wilder's RSI (the standard RSI): average gain/loss seeded with the simple mean of the first
+ * `period` changes, then smoothed as avg = (avg × (period − 1) + x) / period. Mirrors the
+ * database aggregate ss_wilder_rsi; used for tests and cross-checks.
+ */
+export function wilderRsi(closes: number[], period = 14): number | null {
+  if (closes.length < period + 1) return null;
+  let gain = 0, loss = 0;
+  for (let i = 1; i <= period; i++) {
+    const ch = closes[i] - closes[i - 1];
+    gain += Math.max(ch, 0);
+    loss += Math.max(-ch, 0);
+  }
+  gain /= period;
+  loss /= period;
+  for (let i = period + 1; i < closes.length; i++) {
+    const ch = closes[i] - closes[i - 1];
+    gain = (gain * (period - 1) + Math.max(ch, 0)) / period;
+    loss = (loss * (period - 1) + Math.max(-ch, 0)) / period;
+  }
+  if (loss === 0) return gain === 0 ? 50 : 100;
+  return 100 - 100 / (1 + gain / loss);
+}

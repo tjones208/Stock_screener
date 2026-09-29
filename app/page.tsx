@@ -1,10 +1,11 @@
 import Link from "next/link";
 import { db } from "@/lib/db";
 import { loadScreener } from "@/lib/jobs";
-import { applyFilters, BOOL_FILTERS, cleanFilters, DEFAULT_FILTERS, displayValue, GROUPS, NUMERIC_FIELDS, type Filters, type ScreenerRow } from "@/lib/screen";
-import { STRATEGIES, STRATEGY_BY_KEY } from "@/lib/strategies";
+import { applyFilters, BOOL_FILTERS, cleanFilters, DEFAULT_FILTERS, displayValue, earningsStatus, GROUPS, NUMERIC_FIELDS, reversalPattern, type Filters, type ScreenerRow } from "@/lib/screen";
+import { REGIME_TICKER } from "@/lib/jobs";
+import { STRATEGIES, STRATEGY_BY_KEY, strategyGate, type MarketRegime } from "@/lib/strategies";
 import { LEVEL_RULES, levelsFor, type Levels } from "@/lib/levels";
-import { sizePosition, type Size, type SizingSettings } from "@/lib/sizing";
+import { applyOverrides, sizePosition, type Size, type SizingOverrides, type SizingSettings } from "@/lib/sizing";
 import { getSizing } from "@/lib/settings";
 import { big, money, num, pct, signClass } from "@/lib/format";
 import { deleteScreen, saveScreen, saveSizing } from "./actions";
@@ -25,6 +26,7 @@ const derived = (key: string) => {
 const atrPct = derived("atr_pct");
 const dollarVol = derived("dollar_vol");
 const fromVwap = derived("pct_from_vwap");
+const fromSma10 = derived("pct_from_sma10");
 const fromSma20 = derived("pct_from_sma20");
 const fromSma50 = derived("pct_from_sma50");
 const signed = (v: number | null, d = 1) => <span className={signClass(v)}>{pct(v, d)}</span>;
@@ -42,7 +44,23 @@ const COLUMNS: Record<string, Col> = {
   atr_pct: { label: "ATR%", render: (r) => pct(atrPct(r)) },
   vwap: { label: "VWAP", render: (r) => num(r.vwap) },
   pct_from_vwap: { label: "vs VWAP", render: (r) => signed(fromVwap(r)) },
+  pct_from_sma10: { label: "vs SMA10", render: (r) => signed(fromSma10(r)) },
   pct_from_sma20: { label: "vs SMA20", render: (r) => signed(fromSma20(r)) },
+  reversal: {
+    label: "Candle",
+    render: (r) => {
+      const p = reversalPattern(r);
+      return p ? <span className="up">{p}</span> : <span className="muted">none</span>;
+    },
+  },
+  earnings: {
+    label: "Earnings",
+    render: (r) => {
+      const e = earningsStatus(r);
+      if (e === "unknown") return <span className="pill" title="No earnings calendar on the free data plans — check before trading">unknown</span>;
+      return <span className={e === "soon" ? "down" : ""}>{r.next_earnings_date}</span>;
+    },
+  },
   pct_from_sma50: { label: "vs SMA50", render: (r) => signed(fromSma50(r)) },
   range_pos: { label: "Close in range", render: (r) => (r.range_pos == null ? "—" : `${r.range_pos.toFixed(0)}%`) },
   nr7: { label: "NR7", render: (r) => (r.nr7 ? "✓" : "") },
@@ -71,18 +89,23 @@ function qs(f: Filters, patch: Filters = {}) {
 export default async function Screener({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
   const sp = await searchParams;
   const filters = Object.keys(sp).length ? cleanFilters(sp) : DEFAULT_FILTERS;
-  const [rows, { data: screens }, sizing, { data: lists }, { data: items }, jar] = await Promise.all([
+  const [rows, { data: screens }, sizing, { data: lists }, { data: items }, jar, { data: regimeRow }] = await Promise.all([
     loadScreener(),
     db().from("ss_screens").select("id, name, filters").order("name"),
     getSizing(),
     db().from("ss_watchlists").select("id, name").order("sort_order").order("name"),
     db().from("ss_watchlist_items").select("watchlist_id, ticker"),
     cookies(),
+    db().from("ss_indicators").select("close, sma200, as_of").eq("ticker", REGIME_TICKER).maybeSingle(),
   ]);
+  const regime: MarketRegime = regimeRow ? { ticker: REGIME_TICKER, ...regimeRow } : null;
   const wantedList = Number(jar.get(WL_COOKIE)?.value);
   const targetList = lists?.find((l) => l.id === wantedList) ?? lists?.[0];
   const starred = new Set((items ?? []).filter((i) => i.watchlist_id === targetList?.id).map((i) => i.ticker));
-  const results = applyFilters(rows, filters);
+  const strategyForGate = filters.strategy ? STRATEGY_BY_KEY.get(filters.strategy) : undefined;
+  const gate = strategyForGate ? strategyGate(strategyForGate, regime) : { ok: true };
+  // A strategy whose market regime isn't met generates no signals at all.
+  const results = gate.ok ? applyFilters(rows, filters) : [];
   const sectors = [...new Set(rows.map((r) => r.sector).filter(Boolean))].sort() as string[];
   const asOf = rows.reduce((m, r) => (r.as_of > m ? r.as_of : m), "");
   const activeScreen = screens?.find((s) => qs(cleanFilters(s.filters)) === qs(filters));
@@ -99,13 +122,16 @@ export default async function Screener({ searchParams }: { searchParams: Promise
   const sizes = new Map<string, Size | null>(
     shown.map((r) => {
       const l = levels.get(r.ticker);
-      return [r.ticker, l ? sizePosition(l, r, overnight, sizing) : null];
+      return [r.ticker, l ? sizePosition(l, r, overnight, sizing, strategy?.sizing) : null];
     }),
   );
   const isWheel = strategy?.key === "wheel";
+  const nextOpen = strategy?.execution === "next_open";
   const levelHeaders = isWheel
     ? ["Trade", "Credit", "Breakeven", "Buy back", "Contracts", "Collateral", "Profit @ target"]
-    : ["Side", "Entry", "Stop", "Target", "R:R", "Risk/sh", "Shares", "Position", "$ Risk", "$ @ Target", "Sized by"];
+    : nextOpen
+      ? ["Side", "Ref (close)", "Valid T+1 open", "Stop", "Target", "R:R", "R:R @ worst", "Time exit", "Risk/sh (worst)", "Shares", "Position (worst)", "$ Risk", "$ @ Target", "Sized by"]
+      : ["Side", "Entry", "Stop", "Target", "R:R", "Risk/sh", "Shares", "Position", "$ Risk", "$ @ Target", "Sized by"];
 
   return (
     <main>
@@ -139,7 +165,12 @@ export default async function Screener({ searchParams }: { searchParams: Promise
             {strategy.style === "Day trade" && (
               <div className="muted" style={{ marginTop: 4, fontSize: 12 }}>Built from the last close (refreshed ≈ 6am ET): use it as the watchlist for the next session. Entries and exits happen on a live intraday chart.</div>
             )}
-            <SizingPanel s={sizing} overnight={overnight} wheel={isWheel} />
+            {strategy.requires?.benchmarkAbove200 && (
+              <div className={gate.ok ? "muted" : "notice"} style={{ marginTop: 6 }}>
+                <b>Market regime:</b> {gate.reason}
+              </div>
+            )}
+            <SizingPanel s={sizing} overnight={overnight} wheel={isWheel} overrides={strategy.sizing} />
           </div>
         )}
       </div>
@@ -271,7 +302,7 @@ export default async function Screener({ searchParams }: { searchParams: Promise
                   </div>
                   <div className="muted" style={{ fontSize: 11, maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis" }}>{r.name}</div>
                 </td>
-                {strategy && <LevelCells l={levels.get(r.ticker) ?? null} size={sizes.get(r.ticker) ?? null} wheel={isWheel} />}
+                {strategy && <LevelCells l={levels.get(r.ticker) ?? null} size={sizes.get(r.ticker) ?? null} wheel={isWheel} nextOpen={nextOpen} />}
                 {cols.map((c) => <td key={c.key}>{c.render(r)}</td>)}
               </tr>
             ))}
@@ -284,8 +315,8 @@ export default async function Screener({ searchParams }: { searchParams: Promise
 
 const usd0 = (v: number) => `$${Math.round(v).toLocaleString("en-US")}`;
 
-function LevelCells({ l, size, wheel }: { l: Levels | null; size: Size | null; wheel: boolean }) {
-  const n = wheel ? 7 : 11;
+function LevelCells({ l, size, wheel, nextOpen }: { l: Levels | null; size: Size | null; wheel: boolean; nextOpen: boolean }) {
+  const n = wheel ? 7 : nextOpen ? 14 : 11;
   if (!l) return <>{Array.from({ length: n }, (_, i) => <td key={i} className="lvl muted">—</td>)}</>;
   const sizeCells = (count: number, cells: React.ReactNode[]) =>
     size ? cells : Array.from({ length: count }, (_, i) => <td key={`s${i}`} className="lvl muted">—</td>);
@@ -300,6 +331,30 @@ function LevelCells({ l, size, wheel }: { l: Levels | null; size: Size | null; w
           <td key="q" className="lvl"><b>{size?.qty}</b></td>,
           <td key="p" className="lvl">{size && usd0(size.position)}</td>,
           <td key="w" className="lvl up">{size && usd0(size.reward)}</td>,
+        ])}
+      </>
+    );
+  }
+  if (nextOpen) {
+    return (
+      <>
+        <td className="lvl up" title={l.how}>{l.side}</td>
+        <td className="lvl">{money(l.entry)}</td>
+        <td className="lvl" title={l.how}><b>{l.openRange ? `${money(l.openRange.low)}–${money(l.openRange.high)}` : "—"}</b></td>
+        <td className="lvl down">{money(l.stop)}</td>
+        <td className="lvl up">{money(l.target)}</td>
+        <td className="lvl">{l.rr == null ? "—" : `${l.rr.toFixed(1)}R`}</td>
+        <td className="lvl">{l.rrWorst == null ? "—" : `${l.rrWorst.toFixed(1)}R`}</td>
+        <td className="lvl" title={`Exit at the close if neither stop nor target is hit (${l.timeExit?.days} trading days; holidays not skipped)`}>
+          {l.timeExit ? `${l.timeExit.date.slice(5)} close` : "—"}
+        </td>
+        <td className="lvl">{money(l.sizingRisk ?? Math.abs(l.entry - l.stop))}</td>
+        {sizeCells(5, [
+          <td key="q" className="lvl"><b>{size?.qty.toLocaleString("en-US")}</b></td>,
+          <td key="p" className="lvl">{size && usd0(size.position)}</td>,
+          <td key="r" className="lvl down">{size && usd0(size.risk)}</td>,
+          <td key="w" className="lvl up">{size && usd0(size.reward)}</td>,
+          <td key="c" className="lvl"><span className="pill">{size?.cap}</span></td>,
         ])}
       </>
     );
@@ -323,24 +378,39 @@ function LevelCells({ l, size, wheel }: { l: Levels | null; size: Size | null; w
   );
 }
 
-function SizingPanel({ s, overnight, wheel }: { s: SizingSettings; overnight: boolean; wheel: boolean }) {
+function SizingPanel({ s: saved, overnight, wheel, overrides }: { s: SizingSettings; overnight: boolean; wheel: boolean; overrides?: SizingOverrides }) {
+  const s = applyOverrides(saved, overrides);
   const bp = s.account * (overnight ? s.overnightLeverage : s.dayTradeLeverage);
+  const caps = [
+    s.maxPosition > 0 ? usd0(s.maxPosition) : null,
+    s.maxPositionPct > 0 ? `${s.maxPositionPct}% of equity (${usd0((s.account * s.maxPositionPct) / 100)})` : null,
+  ].filter(Boolean);
   const summary = wheel
     ? `${usd0(s.wheelAllocation)} of cash collateral per wheel position`
-    : `Risk ${s.riskPct}% of ${usd0(s.account)} = ${usd0((s.account * s.riskPct) / 100)} per trade · max ${s.maxPosition > 0 ? usd0(s.maxPosition) : "no limit"} per position · ${overnight ? "overnight" : "day-trade"} buying power ${usd0(bp)} · max ${s.maxAdvPct}% of avg volume`;
+    : `Risk ${s.riskPct}% of ${usd0(s.account)} = ${usd0((s.account * s.riskPct) / 100)} per trade · max ${caps.length ? caps.join(" / ") : "no limit"} per position · ${overnight ? "overnight" : "day-trade"} buying power ${usd0(bp)} · max ${s.maxAdvPct}% of avg volume`;
   return (
     <details style={{ marginTop: 8 }}>
       <summary style={{ fontWeight: 400 }}><b>Position sizing:</b> <span className="muted">{summary}</span></summary>
       <form action={saveSizing} className="filters">
-        <label>Account size ($)<input name="account" inputMode="decimal" defaultValue={s.account} /></label>
-        <label>Risk per trade (% of account)<input name="riskPct" inputMode="decimal" defaultValue={s.riskPct} /></label>
-        <label>Max $ per position (0 = no limit)<input name="maxPosition" inputMode="decimal" defaultValue={s.maxPosition} /></label>
-        <label>Day-trade buying power (× account)<input name="dayTradeLeverage" inputMode="decimal" defaultValue={s.dayTradeLeverage} /></label>
-        <label>Overnight buying power (× account)<input name="overnightLeverage" inputMode="decimal" defaultValue={s.overnightLeverage} /></label>
-        <label>Max % of avg daily volume<input name="maxAdvPct" inputMode="decimal" defaultValue={s.maxAdvPct} /></label>
-        <label>Wheel $ per position<input name="wheelAllocation" inputMode="decimal" defaultValue={s.wheelAllocation} /></label>
+        <label>Account size ($)<input name="account" inputMode="decimal" defaultValue={saved.account} /></label>
+        <label>Risk per trade (% of account)<input name="riskPct" inputMode="decimal" defaultValue={saved.riskPct} /></label>
+        <label>Max $ per position (0 = no limit)<input name="maxPosition" inputMode="decimal" defaultValue={saved.maxPosition} /></label>
+        <label>Max % of equity per position (0 = no limit)<input name="maxPositionPct" inputMode="decimal" defaultValue={saved.maxPositionPct} /></label>
+        <label>Day-trade buying power (× account)<input name="dayTradeLeverage" inputMode="decimal" defaultValue={saved.dayTradeLeverage} /></label>
+        <label>Overnight buying power (× account)<input name="overnightLeverage" inputMode="decimal" defaultValue={saved.overnightLeverage} /></label>
+        <label>Max % of avg daily volume<input name="maxAdvPct" inputMode="decimal" defaultValue={saved.maxAdvPct} /></label>
+        <label>Wheel $ per position<input name="wheelAllocation" inputMode="decimal" defaultValue={saved.wheelAllocation} /></label>
         <button type="submit" style={{ alignSelf: "flex-end" }}>Save sizing</button>
       </form>
+      {overrides && (
+        <div className="notice" style={{ fontSize: 12 }}>
+          This strategy tightens your settings: {[
+            overrides.riskPct != null && `risk ≤ ${overrides.riskPct}%`,
+            overrides.maxPositionPct != null && `position ≤ ${overrides.maxPositionPct}% of equity`,
+            overrides.maxAdvPct != null && `≤ ${overrides.maxAdvPct}% of avg volume`,
+          ].filter(Boolean).join(", ")}. The smaller of your setting and the strategy&apos;s limit is used.
+        </div>
+      )}
       <div className="muted" style={{ fontSize: 12 }}>
         Shares = the smallest of (dollar risk ÷ risk per share), (buying power ÷ entry), (max $ per position ÷ entry) and ({s.maxAdvPct}% of average daily volume). The Sized by column shows which one applied.
         Commissions, slippage and short-borrow availability aren&apos;t included.

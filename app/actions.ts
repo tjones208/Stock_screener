@@ -96,6 +96,7 @@ export async function saveSizing(form: FormData) {
     overnightLeverage: pctOrNum("overnightLeverage"),
     maxAdvPct: pctOrNum("maxAdvPct"),
     maxPosition: pctOrNum("maxPosition") || "0",
+    maxPositionPct: pctOrNum("maxPositionPct") || "0",
     wheelAllocation: pctOrNum("wheelAllocation"),
   }));
   revalidatePath("/");

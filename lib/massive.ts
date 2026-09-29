@@ -100,3 +100,13 @@ export async function financials(ticker: string, limit = 5): Promise<FinancialRe
   });
   return r.results ?? [];
 }
+
+/** One ticker's daily bars between two dates (inclusive), oldest first. One API call. */
+export async function dailyRange(ticker: string, from: string, to: string): Promise<{ d: string; o: number; h: number; l: number; c: number; v: number; vw?: number; n?: number }[]> {
+  const r = await get<{ results?: (Omit<GroupedBar, "T">)[] }>(
+    `/v2/aggs/ticker/${encodeURIComponent(ticker)}/range/1/day/${from}/${to}`,
+    { adjusted: "true", sort: "asc", limit: 50000 },
+  );
+  const nyDate = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" });
+  return (r.results ?? []).map((b) => ({ d: nyDate.format(new Date(b.t)), o: b.o, h: b.h, l: b.l, c: b.c, v: b.v, vw: b.vw, n: b.n }));
+}

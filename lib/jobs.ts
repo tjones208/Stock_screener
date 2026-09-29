@@ -1,6 +1,6 @@
 import "server-only";
 import { db, fetchAll, upsertChunks } from "./db";
-import { financials, groupedDaily, listTickers, tickerDetails, type FinancialReport } from "./massive";
+import { dailyRange, financials, groupedDaily, listTickers, tickerDetails, type FinancialReport } from "./massive";
 import { putChain } from "./alpaca";
 import { rankPuts, DEFAULT_WHEEL } from "./wheel";
 import { evaluateRules, type AlertRule } from "./alerts";
@@ -9,11 +9,15 @@ import { pushAll } from "./push";
 import { addDays, nyToday, weekdaysBack } from "./dates";
 import { sectorFromSic } from "./sectors";
 
-// Which bars we keep (storage budget): stocks/ETFs priced $1–$75, plus anything on a watchlist.
+// Which bars we keep: common stocks, ETFs and ADRs priced ≥ $1 (no upper cap), plus anything on a
+// watchlist. Strategies apply their own price/volume floors on top (oversold: ≥ $5, ≥ 1M avg volume).
 const KEEP_TYPES = new Set(["CS", "ETF", "ADRC"]);
 const MIN_PRICE = 1;
-const MAX_PRICE = 75;
+/** Bars above this were skipped before the cap was removed; the backfill fills them in once. */
+const OLD_MAX_PRICE = 75;
 const HISTORY_DAYS = 400;
+/** Market-regime benchmark for strategies that require SPY above its 200-day SMA. */
+export const REGIME_TICKER = "SPY";
 
 const deadline = (ms: number) => {
   const end = Date.now() + ms;
@@ -78,24 +82,49 @@ async function tickerTypes(): Promise<Map<string, string | null>> {
   return new Map(rows.map((r) => [r.ticker, r.type]));
 }
 
-/** Load one trading day of whole-market bars (one API call). Returns rows kept. */
-export async function ingestDay(date: string, types?: Map<string, string | null>, watch?: Set<string>) {
+/**
+ * Load one trading day of whole-market bars (one API call). Returns rows kept.
+ * `onlyAboveOldCap` is the one-time fill for days loaded while bars above $75 were skipped:
+ * it inserts just those bars and never rewrites existing rows (no table bloat).
+ */
+export async function ingestDay(
+  date: string,
+  types?: Map<string, string | null>,
+  watch?: Set<string>,
+  onlyAboveOldCap = false,
+) {
   types ??= await tickerTypes();
   watch ??= await watchlistTickers();
   const bars = await groupedDaily(date);
   const keep = bars.filter((b) => {
+    if (onlyAboveOldCap && !(b.c > OLD_MAX_PRICE)) return false;
     if (watch!.has(b.T)) return true;
-    if (b.c < MIN_PRICE || b.c > MAX_PRICE) return false;
+    if (b.c < MIN_PRICE) return false;
     if (types!.size) return KEEP_TYPES.has(types!.get(b.T) ?? "");
     return /^[A-Z]{1,5}$/.test(b.T); // before the first ticker sync: plain symbols only
   });
-  await upsertChunks(
-    "ss_daily_bars",
-    keep.map((b) => ({ ticker: b.T, d: date, o: b.o, h: b.h, l: b.l, c: b.c, v: Math.round(b.v), vw: b.vw ?? null, n: b.n ?? null })),
-    "ticker,d",
-  );
-  await db().from("ss_loaded_days").upsert({ d: date, rows: keep.length, loaded_at: new Date().toISOString() });
+  const rows = keep.map((b) => ({ ticker: b.T, d: date, o: b.o, h: b.h, l: b.l, c: b.c, v: Math.round(b.v), vw: b.vw ?? null, n: b.n ?? null }));
+  for (let i = 0; i < rows.length; i += 1000) {
+    const { error } = await db().from("ss_daily_bars")
+      .upsert(rows.slice(i, i + 1000), { onConflict: "ticker,d", ignoreDuplicates: onlyAboveOldCap });
+    if (error) throw new Error(`ss_daily_bars: ${error.message}`);
+  }
+  const marker = onlyAboveOldCap
+    ? db().from("ss_loaded_days").update({ full_universe: true }).eq("d", date)
+    : db().from("ss_loaded_days").upsert({ d: date, rows: keep.length, loaded_at: new Date().toISOString(), full_universe: true });
+  const { error } = await marker;
+  if (error) throw new Error(`ss_loaded_days: ${error.message}`);
   return keep.length;
+}
+
+/** Make sure the regime benchmark has full history (one range call instead of waiting for the fill). */
+async function ensureRegimeHistory(today: string): Promise<number> {
+  const { count } = await db().from("ss_daily_bars").select("d", { count: "exact", head: true }).eq("ticker", REGIME_TICKER);
+  if ((count ?? 0) >= 250) return 0;
+  const bars = await dailyRange(REGIME_TICKER, addDays(today, -HISTORY_DAYS), addDays(today, -1));
+  const rows = bars.map((b) => ({ ticker: REGIME_TICKER, d: b.d, o: b.o, h: b.h, l: b.l, c: b.c, v: Math.round(b.v), vw: b.vw ?? null, n: b.n ?? null }));
+  await upsertChunks("ss_daily_bars", rows, "ticker,d");
+  return rows.length;
 }
 
 /** Fill in missing history, newest first, until the time budget runs out. Safe to call repeatedly. */
@@ -108,11 +137,21 @@ export async function backfill(budgetMs = 270_000) {
   const missing = wanted.filter((d) => !have.has(d) && d < today); // today's bars load in the nightly job
   const types = await tickerTypes();
   const watch = await watchlistTickers();
+  const regimeBars = await ensureRegimeHistory(today);
   const done: string[] = [];
   for (const d of missing) {
     if (left() < 20_000) break;
     await ingestDay(d, types, watch);
     done.push(d);
+  }
+  // One-time fill of bars above the old $75 cap for days loaded before it was removed.
+  const { data: partial } = await db().from("ss_loaded_days").select("d").eq("full_universe", false).order("d", { ascending: false });
+  let filled = 0;
+  for (const { d } of partial ?? []) {
+    if (left() < 20_000) break;
+    await ingestDay(d as string, types, watch, true);
+    done.push(d as string);
+    filled++;
   }
   let indicators: number | null = null;
   if (done.length) {
@@ -121,7 +160,14 @@ export async function backfill(budgetMs = 270_000) {
     if (error) throw new Error(`ss_refresh_indicators: ${error.message}`);
     indicators = data as number;
   }
-  return { loaded: done.length, remaining: missing.length - done.length, indicators };
+  return {
+    loaded: done.length - filled,
+    remaining: missing.length - (done.length - filled),
+    aboveOldCapFilled: filled,
+    aboveOldCapRemaining: (partial?.length ?? 0) - filled,
+    regimeBars,
+    indicators,
+  };
 }
 
 /**

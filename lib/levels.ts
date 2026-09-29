@@ -15,6 +15,17 @@ export type Levels = {
   rr: number | null;
   /** How the entry is triggered, in a few words. */
   how: string;
+  /**
+   * Next-open strategies: the entry is a market-on-open order on T+1, taken only if the open
+   * lands inside this range (gap filter). `entry` is then the reference price (signal-day close).
+   */
+  openRange?: { low: number; high: number };
+  /** Per-share risk to size with: the worst allowed fill (top of openRange) minus the stop. */
+  sizingRisk?: number;
+  /** R:R if filled at the top of the open range (the worst allowed fill). */
+  rrWorst?: number | null;
+  /** Hard time stop: exit at the close of this trading day if neither stop nor target hit. */
+  timeExit?: { days: number; date: string };
 };
 
 /** One-line description of each strategy's level rules, shown under the playbook. */
@@ -26,19 +37,33 @@ export const LEVEL_RULES: Record<string, string> = {
   squeeze: "Buy a break of today's (narrow) high, stop just under today's low, target 2R.",
   momentum: "Buy a break of the 52-week high (or today's high if higher). Stop 1.5 ATR below, target 2R.",
   pullback: "Buy a break of today's high to confirm the bounce. Stop 0.25 ATR under today's low, target 2R.",
-  oversold: "Buy near today's close. Stop 1.5 ATR below. Target the 20-day average, or 1 ATR if that's not above the entry.",
+  oversold:
+    "Market-on-open buy on the next session (T+1), only if it opens between close − 1 ATR and close + 0.5 ATR; skip the trade otherwise. " +
+    "Stop at close − 1.5 ATR (a fixed price). Target the 10-day average, or entry + 1.5 ATR if the 10-day is below the entry. " +
+    "Time exit at the close of the 5th trading day. Size assumes the worst allowed fill (top of the range), so a gap up can't enlarge the risk.",
 };
 
 const round = (x: number) => Math.round(x * 100) / 100;
 const TICK = 0.01;
-const MAX_RISK_PCT = 0.2;
+/** Setups more volatile than this (ATR as a share of price) get no mechanical plan. */
+export const MAX_ATR_PCT = 0.12;
+
+/** Add `n` weekdays to an ISO date (market holidays are not skipped). */
+export function addTradingDays(iso: string, n: number): string {
+  const d = new Date(iso + "T00:00:00Z");
+  let added = 0;
+  while (added < n) {
+    d.setUTCDate(d.getUTCDate() + 1);
+    const day = d.getUTCDay();
+    if (day !== 0 && day !== 6) added++;
+  }
+  return d.toISOString().slice(0, 10);
+}
 
 function plan(side: "Long" | "Short", entry: number, stop: number, target: number, how: string): Levels | null {
   const risk = side === "Long" ? entry - stop : stop - entry;
   const reward = side === "Long" ? target - entry : entry - target;
   if (!(risk > 0) || !(reward > 0) || !Number.isFinite(risk)) return null;
-  // A stop more than 20% away means the stock is too wild for mechanical levels to mean anything.
-  if (risk / entry > MAX_RISK_PCT) return null;
   return { side, entry: round(entry), stop: round(stop), target: round(target), rr: Math.round((reward / risk) * 10) / 10, how };
 }
 
@@ -60,6 +85,8 @@ export function levelsFor(strategy: string, r: ScreenerRow): Levels | null {
     };
   }
   if (close == null || atr == null || !(atr > 0)) return null;
+  // Too volatile for mechanical levels to mean anything (e.g. pump-and-dump microcaps).
+  if (atr / close > MAX_ATR_PCT) return null;
 
   switch (strategy) {
     case "vwap": {
@@ -109,10 +136,23 @@ export function levelsFor(strategy: string, r: ScreenerRow): Levels | null {
       return plan("Long", entry, stop, twoR("Long", entry, stop), "Buy-stop above today's high");
     }
     case "oversold": {
-      const entry = close;
-      const stop = entry - 1.5 * atr;
-      const target = r.sma20 != null && r.sma20 > entry ? r.sma20 : entry + atr;
-      return plan("Long", entry, stop, target, "Buy near the close");
+      // Signal is known only after the close, so execution is the next open (T+1), not today's close.
+      const ref = close;
+      const stop = ref - 1.5 * atr; // fixed price, set from the signal day
+      const openRange = { low: ref - 1.0 * atr, high: ref + 0.5 * atr };
+      const target = r.sma10 != null && r.sma10 > ref ? r.sma10 : ref + 1.5 * atr;
+      const base = plan("Long", ref, stop, target, "");
+      if (!base) return null;
+      const worstRisk = openRange.high - stop; // 2.0 ATR
+      const worstReward = target - openRange.high;
+      return {
+        ...base,
+        how: `Market-on-open T+1 if it opens $${openRange.low.toFixed(2)}–$${openRange.high.toFixed(2)}; skip otherwise`,
+        openRange: { low: round(openRange.low), high: round(openRange.high) },
+        sizingRisk: round(worstRisk),
+        rrWorst: worstReward > 0 ? Math.round((worstReward / worstRisk) * 10) / 10 : null,
+        timeExit: { days: 5, date: addTradingDays(r.as_of, 5) },
+      };
     }
     default:
       return null;

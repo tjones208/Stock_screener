@@ -66,6 +66,9 @@ export type ScreenerRow = {
   day_open: number | null;
   day_high: number | null;
   day_low: number | null;
+  sma10: number | null;
+  prev_open: number | null;
+  prev_close: number | null;
 };
 
 export const GROUPS = ["Price & volume", "Day trading", "Technical", "Fundamental", "Wheel"] as const;
@@ -105,6 +108,8 @@ export const NUMERIC_FIELDS: NumericField[] = [
   { key: "atr14", label: "ATR (14)", group: "Technical", unit: "$" },
   { key: "change_5d", label: "Change 5 days", group: "Technical", unit: "%" },
   { key: "change_20d", label: "Change 20 days", group: "Technical", unit: "%" },
+  { key: "pct_from_sma10", label: "Close vs SMA 10", group: "Technical", unit: "%",
+    compute: (r) => (r.close != null && r.sma10 ? ((r.close - r.sma10) / r.sma10) * 100 : null) },
   { key: "pct_from_sma20", label: "Close vs SMA 20", group: "Technical", unit: "%",
     compute: (r) => (r.close != null && r.sma20 ? ((r.close - r.sma20) / r.sma20) * 100 : null) },
   { key: "pct_from_sma50", label: "Close vs SMA 50", group: "Technical", unit: "%",
@@ -149,6 +154,12 @@ export const BOOL_FILTERS = {
   near_52w_low: { label: "Within 3% of 52w low", test: (r: ScreenerRow) => (r.pct_from_low ?? 99) <= 3 },
   has_put: { label: "Has a wheel-eligible put", test: (r: ScreenerRow) => r.put_contract != null },
   sp500: { label: "S&P 500 only", test: (r: ScreenerRow) => r.in_sp500 },
+  green_close: { label: "Green close (close > open)", test: (r: ScreenerRow) => gt(r.close, r.day_open) },
+  bullish_reversal: { label: "Bullish reversal candle (green, hammer or engulfing)", test: (r: ScreenerRow) => reversalPattern(r) != null },
+  no_earnings_5d: {
+    label: "No earnings in next 5 trading days",
+    test: (r: ScreenerRow) => !earningsWithin(r, 5),
+  },
   no_earnings_30d: {
     label: "No earnings in next 30 days",
     test: (r: ScreenerRow) => !r.next_earnings_date || daysUntil(r.next_earnings_date) > 30 || daysUntil(r.next_earnings_date) < 0,
@@ -175,6 +186,51 @@ export function deathCross(r: ScreenerRow) {
 }
 function daysUntil(iso: string) {
   return Math.round((Date.parse(iso) - Date.now()) / 86_400_000);
+}
+
+/** Weekdays from `fromIso` (exclusive) through `toIso` (inclusive); 0 if it's the same day, negative if past. */
+export function tradingDaysBetween(fromIso: string, toIso: string): number {
+  const from = Date.parse(fromIso + "T00:00:00Z"), to = Date.parse(toIso + "T00:00:00Z");
+  if (to <= from) return Math.round((to - from) / 86_400_000) === 0 ? 0 : -1;
+  let n = 0;
+  for (let t = from + 86_400_000; t <= to; t += 86_400_000) {
+    const day = new Date(t).getUTCDay();
+    if (day !== 0 && day !== 6) n++;
+  }
+  return n;
+}
+
+/**
+ * True when an earnings date is known and falls within the next `n` trading days of the
+ * signal date. Unknown dates return false — the free data plans carry no earnings calendar,
+ * so callers should flag "unknown" rather than treat it as clear (see earningsStatus).
+ */
+export function earningsWithin(r: ScreenerRow, n: number): boolean {
+  if (!r.next_earnings_date) return false;
+  const days = tradingDaysBetween(r.as_of, r.next_earnings_date);
+  return days >= 0 && days <= n;
+}
+
+export function earningsStatus(r: ScreenerRow): "unknown" | "clear" | "soon" {
+  if (!r.next_earnings_date) return "unknown";
+  return earningsWithin(r, 5) ? "soon" : "clear";
+}
+
+/**
+ * Bullish confirmation on the signal day, strongest first:
+ *  - engulfing: prior day red, today green, opened ≤ prior close and closed ≥ prior open
+ *  - hammer:    lower wick ≥ 2× the body, upper wick ≤ the body, close in the top half of the range
+ *  - green:     close > open
+ */
+export function reversalPattern(r: ScreenerRow): "engulfing" | "hammer" | "green" | null {
+  const { day_open: o, day_high: h, day_low: l, close: c, prev_open: po, prev_close: pc } = r;
+  if (o == null || h == null || l == null || c == null) return null;
+  if (po != null && pc != null && pc < po && c > o && o <= pc && c >= po) return "engulfing";
+  const range = h - l;
+  const body = Math.abs(c - o);
+  if (range > 0 && Math.min(o, c) - l >= 2 * body && h - Math.max(o, c) <= body && (c - l) / range >= 0.5) return "hammer";
+  if (c > o) return "green";
+  return null;
 }
 
 export function displayValue(f: NumericField, r: ScreenerRow): number | null {

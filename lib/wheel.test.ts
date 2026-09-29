@@ -1,8 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseOcc, rankPuts, scorePut, type RawPut } from "./wheel.ts";
-import { emaSeries, smaSeries } from "./indicators.ts";
-import { applyFilters, cleanFilters, type ScreenerRow } from "./screen.ts";
+import { emaSeries, smaSeries, wilderRsi } from "./indicators.ts";
+import { applyFilters, cleanFilters, earningsStatus, earningsWithin, reversalPattern, tradingDaysBetween, type ScreenerRow } from "./screen.ts";
 import { evaluateRules, type AlertRule } from "./alerts.ts";
 
 test("parseOcc", () => {
@@ -56,7 +56,7 @@ const row = (o: Partial<ScreenerRow>): ScreenerRow => ({
   next_earnings_date: null, put_contract: "F261030P00010000", put_expiration: "2026-10-30", put_dte: 32, put_strike: 10,
   put_mid: 0.2, put_iv: 0.35, put_delta: -0.22, put_oi: 5000, put_spread_pct: 0.05, put_annual_yield: 0.23, wheel_score: 40,
   vwap: 10.9, range_pos: 60, change_5d: 1, change_20d: 3, nr7: false, inside_day: false,
-  day_open: 10.8, day_high: 11.2, day_low: 10.7, ...o,
+  day_open: 10.8, day_high: 11.2, day_low: 10.7, sma10: 11.3, prev_open: 11.1, prev_close: 10.9, ...o,
 });
 
 test("filters", () => {
@@ -127,14 +127,14 @@ test("strategy levels", async () => {
   const wheel = levelsFor("wheel", base)!; // strike 10, mid 0.20
   assert.deepEqual([wheel.side, wheel.entry, wheel.stop, wheel.target, wheel.rr], ["Sell put", 0.2, 9.8, 0.1, null]);
 
-  const over = levelsFor("oversold", base)!; // SMA20 11.5 above close → target the average
-  assert.equal(over.target, 11.5);
+  const over = levelsFor("oversold", base)!; // SMA10 11.3 above close → target the 10-day average
+  assert.equal(over.target, 11.3);
 
   // Missing data → no plan instead of a bogus one.
   assert.equal(levelsFor("orb", row({ ...base, day_high: null })), null);
   assert.equal(levelsFor("vwap", row({ ...base, atr14: null })), null);
   assert.equal(levelsFor("unknown", base), null);
-  // Stop > 20% from entry (ATR ≈ 79% of price, like a pump-and-dump microcap) → no plan.
+  // ATR ≈ 79% of price (a pump-and-dump microcap) is over the 12% ATR limit → no plan.
   assert.equal(levelsFor("orb", row({ ...base, close: 7.7, atr14: 6.07, day_high: 12.1, day_low: 6.8, range_pos: 17 })), null);
 });
 
@@ -177,4 +177,80 @@ test("position sizing", async () => {
   // 0 (or blank) means no cap; negative input falls back to the default (no cap).
   assert.equal(normalizeSizing({ maxPosition: "0" }).maxPosition, 0);
   assert.equal(normalizeSizing({ maxPosition: "-5" }).maxPosition, 0);
+});
+
+test("Wilder RSI matches the database's exact recursive aggregate", () => {
+  // Same 21-point series run through ss_wilder_rsi() in Postgres → 67.2549240241038
+  const xs = Array.from({ length: 21 }, (_, i) => (i % 2 === 0 ? 10 + i * 0.25 : 10 + i * 0.25 - 0.75));
+  assert.ok(Math.abs(wilderRsi(xs)! - 67.2549240241038) < 1e-9);
+  assert.equal(wilderRsi([1, 2, 3]), null); // needs 14 changes
+  assert.equal(wilderRsi(Array.from({ length: 20 }, (_, i) => i)), 100); // only gains
+  assert.equal(wilderRsi(Array.from({ length: 20 }, () => 5)), 50); // flat
+});
+
+test("reversal candles", () => {
+  // ELVN 2026-09-25: open 45.54, high 45.77, low 44.175, close 44.75 — red, small lower wick → none.
+  const elvn = row({ day_open: 45.54, day_high: 45.77, day_low: 44.175, close: 44.75, prev_open: 45.9, prev_close: 45.17 });
+  assert.equal(reversalPattern(elvn), null);
+  assert.equal(reversalPattern(row({ day_open: 10, close: 10.2, day_high: 10.3, day_low: 9.9, prev_open: 10.5, prev_close: 10.3 })), "green");
+  // Bullish engulfing: prior red 10.5→10.1, today opens 10.0 (≤ 10.1) and closes 10.6 (≥ 10.5).
+  assert.equal(reversalPattern(row({ prev_open: 10.5, prev_close: 10.1, day_open: 10.0, close: 10.6, day_high: 10.7, day_low: 9.95 })), "engulfing");
+  // Red hammer: body 0.05, lower wick 0.60, upper wick 0.02, close in the top of the range.
+  assert.equal(reversalPattern(row({ day_open: 10.0, close: 9.95, day_high: 10.02, day_low: 9.35, prev_open: 10.4, prev_close: 10.1 })), "hammer");
+});
+
+test("earnings within N trading days", () => {
+  assert.equal(tradingDaysBetween("2026-09-25", "2026-10-02"), 5); // Fri → next Fri
+  assert.equal(tradingDaysBetween("2026-09-25", "2026-09-28"), 1); // weekend skipped
+  const r = (d: string | null) => row({ as_of: "2026-09-25", next_earnings_date: d });
+  assert.equal(earningsWithin(r("2026-10-02"), 5), true);
+  assert.equal(earningsWithin(r("2026-10-05"), 5), false);
+  assert.equal(earningsStatus(r(null)), "unknown");
+  assert.deepEqual(applyFilters([r("2026-09-30"), r(null)], { no_earnings_5d: "1" }).map((x) => x.next_earnings_date), [null]);
+});
+
+test("market regime gate", async () => {
+  const { STRATEGY_BY_KEY, strategyGate } = await import("./strategies.ts");
+  const over = STRATEGY_BY_KEY.get("oversold")!;
+  assert.equal(strategyGate(over, null).ok, false); // unknown regime blocks
+  assert.equal(strategyGate(over, { ticker: "SPY", close: 500, sma200: 520, as_of: "2026-09-25" }).ok, false);
+  assert.equal(strategyGate(over, { ticker: "SPY", close: 560, sma200: 520, as_of: "2026-09-25" }).ok, true);
+  assert.equal(strategyGate(STRATEGY_BY_KEY.get("orb")!, null).ok, true); // strategies without the rule aren't gated
+});
+
+test("oversold plan + sizing: ELVN 2026-09-25 with $120k", async () => {
+  const { levelsFor } = await import("./levels.ts");
+  const { sizePosition, normalizeSizing } = await import("./sizing.ts");
+  const { STRATEGY_BY_KEY } = await import("./strategies.ts");
+  const elvn = row({
+    ticker: "ELVN", as_of: "2026-09-25", close: 44.75, atr14: 2.25286, sma10: 48.967, sma20: 53.4315,
+    avg_vol20: 1_423_300, day_open: 45.54, day_high: 45.77, day_low: 44.175,
+  });
+  const l = levelsFor("oversold", elvn)!;
+  assert.deepEqual(
+    [l.entry, l.stop, l.target, l.openRange, l.rr, l.rrWorst, l.sizingRisk, l.timeExit],
+    [44.75, 41.37, 48.97, { low: 42.5, high: 45.88 }, 1.2, 0.7, 4.51, { days: 5, date: "2026-10-02" }],
+  );
+  const s = normalizeSizing({ account: 120000, riskPct: 1, maxAdvPct: 1 });
+  const z = sizePosition(l, elvn, true, s, STRATEGY_BY_KEY.get("oversold")!.sizing)!;
+  // $600 ÷ $4.51 worst-case risk = 133 sh; 15% cap = $18,000 ÷ 45.88 = 392; 0.10% ADV = 1,423.
+  assert.deepEqual([z.qty, z.cap, Math.round(z.position), Math.round(z.risk), Math.round(z.reward)], [133, "risk", 6102, 600, 561]);
+  assert.deepEqual([z.used!.riskPct, z.used!.maxPositionPct, z.used!.maxAdvPct], [0.5, 15, 0.1]);
+});
+
+test("strategy overrides only tighten", async () => {
+  const { applyOverrides, normalizeSizing } = await import("./sizing.ts");
+  const s = normalizeSizing({ riskPct: 0.25, maxAdvPct: 2, maxPositionPct: 10 });
+  const t = applyOverrides(s, { riskPct: 0.5, maxAdvPct: 0.1, maxPositionPct: 15 });
+  assert.deepEqual([t.riskPct, t.maxAdvPct, t.maxPositionPct], [0.25, 0.1, 10]); // user's tighter values win
+  assert.equal(applyOverrides(normalizeSizing({}), { maxPositionPct: 15 }).maxPositionPct, 15); // 0 = off → strategy cap applies
+});
+
+test("ATR% limit replaces the 20% stop rule", async () => {
+  const { levelsFor } = await import("./levels.ts");
+  const ok = row({ close: 10, atr14: 1.1, day_high: 10.3, day_low: 9.6, vwap: 10.1, sma10: 11 }); // 11%
+  const wild = row({ close: 10, atr14: 1.3, day_high: 10.3, day_low: 9.6, vwap: 10.1, sma10: 11 }); // 13%
+  assert.ok(levelsFor("oversold", ok));
+  assert.equal(levelsFor("oversold", wild), null);
+  assert.equal(levelsFor("orb", wild), null);
 });

@@ -5,6 +5,7 @@ Next.js on Vercel Hobby + Supabase (`meal-plan-sync` project, tables prefixed `s
 
 - **Screener:** 30 numeric filters (price, volume, technicals, fundamentals, wheel metrics) plus 13 conditions (above SMA 200, golden cross, near 52w low, …). Filters live in the URL, and you can save any filter set as a named screen.
 - **Strategy presets:** pick a strategy (wheel, VWAP reversion, opening-range breakout, gap & go, NR7 squeeze, momentum, pullback, oversold bounce) to prefill filters and columns. Each row shows mechanical **entry / stop / target / R:R** levels from that strategy's rules (`lib/levels.ts`). They're based on end-of-day data and are a plan for the next session, not a prediction.
+- **Oversold bounce (swing):** Wilder RSI(14) ≤ 30, down ≥ 5% in 5 days, above the 200-day, ATR ≤ 12%, a bullish reversal candle (green / hammer / engulfing), no earnings within 5 trading days (flagged "unknown" when no date is available), and only while SPY is above its 200-day. Plans are market-on-open T+1 inside a gap band (close − 1 ATR to close + 0.5 ATR), with the stop at close − 1.5 ATR, the target at the 10-day SMA (or + 1.5 ATR) and a 5-trading-day time exit. Sizing: 0.5% risk off the worst allowed fill, ≤ 15% of equity and ≤ 0.10% of average volume (these only tighten your own settings).
 - **Wheel:** each night the app pulls put chains and ranks them by annualized yield, then IV, then low delta, then liquidity (OI and spread). Strikes are capped at $50, so collateral stays ≤ $5,000.
 - **Ticker page:** candlestick chart ([TradingView Lightweight Charts](https://www.tradingview.com/lightweight-charts/)) with EMA21, SMA50/200 and the best put strike, plus technicals, fundamentals and put candidates.
 - **Watchlists:** listed names always get their options scanned, get fundamentals first, and keep full price history.
@@ -14,7 +15,7 @@ Next.js on Vercel Hobby + Supabase (`meal-plan-sync` project, tables prefixed `s
 
 | What | Source | Notes |
 |---|---|---|
-| Daily bars (whole market) | Massive Stocks Basic (free) | `grouped daily`: 1 call/day for every ticker. 5 calls/min. |
+| Daily bars (whole market) | Massive Stocks Basic (free) | `grouped daily`: 1 call/day for every ticker. 5 calls/min. Common stocks, ETFs and ADRs priced ≥ $1, no upper price cap. RSI is Wilder's. |
 | Fundamentals | Massive ticker details + financials | 2 tickers/min on a rolling schedule. Order: watchlist, then S&P 500, then the rest. Refreshed every 30 days. |
 | Options | Alpaca paper account, `indicative` feed (free) | Quotes are delayed and modified, so treat premiums as approximate and **confirm in Robinhood**. |
 | S&P 500 list + GICS sectors | [datasets/s-and-p-500-companies](https://github.com/datasets/s-and-p-500-companies) | Other tickers get a sector mapped from their SIC code. |

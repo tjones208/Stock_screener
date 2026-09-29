@@ -2,6 +2,10 @@
 // All data is end-of-day, so day-trading presets build *tomorrow's* watchlist from today's close;
 // entries and exits still happen intraday on a live chart.
 import type { Filters } from "./screen.ts";
+import type { SizingOverrides } from "./sizing.ts";
+
+/** Market-wide state a strategy can require before it generates any signals. */
+export type MarketRegime = { ticker: string; close: number | null; sma200: number | null; as_of: string | null } | null;
 
 export type Strategy = {
   key: string;
@@ -14,6 +18,12 @@ export type Strategy = {
   filters: Filters;
   /** Column keys from the screener's column registry. */
   columns: string[];
+  /** Market conditions that must hold, or the strategy shows no signals at all. */
+  requires?: { benchmarkAbove200?: boolean };
+  /** Strategy-specific sizing limits. These only ever tighten the user's global settings. */
+  sizing?: SizingOverrides;
+  /** "close" = level-based orders placed off today's bar; "next_open" = market-on-open T+1 with a gap band. */
+  execution?: "close" | "next_open";
 };
 
 export const STRATEGIES: Strategy[] = [
@@ -52,7 +62,7 @@ export const STRATEGIES: Strategy[] = [
     playbook: "Mark the first 5- or 15-minute high/low; enter on a break with volume, stop at the other side of the range.",
     filters: {
       close_min: "5", close_max: "200", avg_vol20_min: "1000000",
-      vol_ratio_min: "2", atr_pct_min: "3", atr_pct_max: "15", dollar_vol_min: "20000000",
+      vol_ratio_min: "2", atr_pct_min: "3", atr_pct_max: "12", dollar_vol_min: "20000000",
       sort: "vol_ratio", dir: "desc",
     },
     columns: ["close", "change_pct", "gap_pct", "vol_ratio", "atr_pct", "range_pos", "dollar_vol", "nr7"],
@@ -65,7 +75,7 @@ export const STRATEGIES: Strategy[] = [
     playbook: "Watch for a second-day move: buy a break of today's high or the premarket high; avoid if it gaps down below today's close.",
     filters: {
       close_min: "2", close_max: "100", avg_vol20_min: "500000",
-      gap_pct_min: "4", vol_ratio_min: "2", range_pos_min: "70", atr_pct_max: "20",
+      gap_pct_min: "4", vol_ratio_min: "2", range_pos_min: "70", atr_pct_max: "12",
       sort: "gap_pct", dir: "desc",
     },
     columns: ["close", "gap_pct", "change_pct", "vol_ratio", "range_pos", "atr_pct", "pct_from_high"],
@@ -114,14 +124,23 @@ export const STRATEGIES: Strategy[] = [
     key: "oversold",
     name: "Oversold bounce",
     style: "Swing",
-    summary: "Long-term uptrend (above the 200-day) that dropped ≥ 5% in 5 days to RSI ≤ 30 — short-term mean reversion.",
-    playbook: "Buy near the close or on the first up day; exit on a close above the 5- or 10-day average. Keep size small.",
+    summary:
+      "Long-term uptrend (above the 200-day) that fell ≥ 5% in 5 days to Wilder RSI(14) ≤ 30, then printed a bullish reversal candle " +
+      "(green close, hammer or engulfing). Only while SPY is above its 200-day; ATR ≤ 12% of price; no earnings in the next 5 trading days.",
+    playbook:
+      "Buy at the next open (market-on-open) only if it opens inside the valid range. Exit at the 10-day average (target), the stop, " +
+      "or the close of the 5th trading day, whichever comes first. Check the news first: the earnings calendar isn't available on the free data plans.",
     filters: {
       close_min: "5", avg_vol20_min: "1000000",
-      above_sma200: "1", rsi14_max: "30", change_5d_max: "-5",
+      above_sma200: "1", rsi14_max: "30", change_5d_max: "-5", atr_pct_max: "12",
+      bullish_reversal: "1", no_earnings_5d: "1",
       sort: "rsi14", dir: "asc",
     },
-    columns: ["close", "change_pct", "change_5d", "rsi14", "pct_from_sma20", "vol_ratio", "atr_pct"],
+    columns: ["close", "change_pct", "reversal", "change_5d", "rsi14", "pct_from_sma10", "atr_pct", "earnings"],
+    requires: { benchmarkAbove200: true },
+    // 0.5% risk per trade, ≤ 15% of equity per position, ≤ 0.10% of average daily volume.
+    sizing: { riskPct: 0.5, maxPositionPct: 15, maxAdvPct: 0.1 },
+    execution: "next_open",
   },
 ];
 
@@ -130,4 +149,20 @@ export const STRATEGY_BY_KEY = new Map(STRATEGIES.map((s) => [s.key, s]));
 /** Screener query string for a preset (includes strategy=key so columns and notes follow along). */
 export function strategyQuery(s: Strategy): string {
   return new URLSearchParams({ strategy: s.key, ...s.filters }).toString();
+}
+
+/**
+ * Whether a strategy may generate signals under the current market regime.
+ * A required regime that can't be confirmed (benchmark missing or < 200 days of history) blocks too.
+ */
+export function strategyGate(s: Strategy, regime: MarketRegime): { ok: boolean; reason?: string } {
+  if (!s.requires?.benchmarkAbove200) return { ok: true };
+  const t = regime?.ticker ?? "SPY";
+  if (!regime || regime.close == null || regime.sma200 == null) {
+    return { ok: false, reason: `Market regime unknown: ${t} doesn't have 200 days of history loaded yet, so long signals are paused.` };
+  }
+  if (regime.close <= regime.sma200) {
+    return { ok: false, reason: `${t} closed at $${regime.close.toFixed(2)}, below its 200-day average ($${regime.sma200.toFixed(2)}). Long signals are off until it recovers.` };
+  }
+  return { ok: true, reason: `${t} $${regime.close.toFixed(2)} is above its 200-day average ($${regime.sma200.toFixed(2)}).` };
 }
