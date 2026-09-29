@@ -2,7 +2,9 @@
 import { revalidatePath } from "next/cache";
 import { db, upsertChunks } from "@/lib/db";
 import { MOM_DEFAULTS, normalizeMomConfig, type MomKey } from "@/lib/momentum/config";
-import { getMomConfig, setMomConfig } from "@/lib/momentum/jobs";
+import { getMomConfig, loadCalendar, setMomConfig } from "@/lib/momentum/jobs";
+import { buyLimits, sharesAt } from "@/lib/momentum/orders";
+import { promoteAlternate, recordFill } from "@/lib/momentum/tickets";
 
 export async function saveMomConfig(form: FormData) {
   const current = await getMomConfig();
@@ -50,4 +52,59 @@ export async function uploadEarnings(form: FormData) {
   await db().from("ss_earnings_calendar").delete().gte("report_date", "1900-01-01");
   await upsertChunks("ss_earnings_calendar", [...rows.values()], "ticker,report_date");
   revalidatePath("/momentum");
+}
+
+/** 09:45 quotes for every open buy ticket on the form → LP1 / LP2 and shares at each. */
+export async function quoteTickets(form: FormData) {
+  const cfg = await getMomConfig();
+  const ids = form.getAll("id").map(Number).filter(Boolean);
+  const { data: tix } = await db().from("ss_mom_tickets").select("id, t_target, atr20, cap").in("id", ids);
+  for (const t of tix ?? []) {
+    const bid = Number(form.get(`bid_${t.id}`));
+    const ask = Number(form.get(`ask_${t.id}`));
+    if (!form.get(`bid_${t.id}`) || !form.get(`ask_${t.id}`)) continue;
+    const r = buyLimits(bid, ask, t.cap);
+    const base = { bid, ask, quoted_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+    if ("error" in r) continue;
+    if (r.noBuy) {
+      await db().from("ss_mom_tickets").update({ ...base, lp1: null, lp2: null, shares_lp1: null, shares_lp2: null, note: r.reason }).eq("id", t.id);
+      continue;
+    }
+    const s1 = sharesAt(t.t_target, r.lp1, t.atr20, cfg);
+    const s2 = sharesAt(t.t_target, r.lp2, t.atr20, cfg);
+    const note = s1.tooSmall ? "Too few shares at LP1 for the target (rule 6.7): skip and use the next alternate." : null;
+    await db().from("ss_mom_tickets").update({
+      ...base, lp1: r.lp1, lp2: r.lp2, shares_lp1: s1.shares, shares_lp2: s2.shares, risk_cap_shares: s1.byRisk, note,
+    }).eq("id", t.id);
+  }
+  revalidatePath("/momentum");
+}
+
+export async function fillTicket(form: FormData) {
+  const cfg = await getMomConfig();
+  const id = Number(form.get("id"));
+  const price = Number(form.get("price"));
+  const shares = Number(form.get("shares"));
+  const at = String(form.get("filled_at") || "");
+  if (!(id > 0) || !(price > 0) || !(shares > 0)) throw new Error("Enter the average fill price and the shares filled.");
+  // datetime-local has no zone; fills are entered in New York time (EST or EDT for that date).
+  const filledAt = at ? nyLocalToIso(at) : new Date().toISOString();
+  await recordFill(id, price, shares, filledAt, cfg);
+  revalidatePath("/momentum");
+}
+
+export async function dropTicket(form: FormData) {
+  const id = Number(form.get("id"));
+  const { data: t } = await db().from("ss_mom_tickets").update({ status: "dropped", note: "Dropped by hand", updated_at: new Date().toISOString() })
+    .eq("id", id).select("signal_date, kind, trade_date").single();
+  if (t) await promoteAlternate(t, t.trade_date, await getMomConfig(), await loadCalendar());
+  revalidatePath("/momentum");
+}
+
+function nyLocalToIso(local: string): string {
+  const guess = new Date(`${local}:00Z`);
+  const off = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", timeZoneName: "shortOffset" })
+    .formatToParts(guess).find((p) => p.type === "timeZoneName")?.value ?? "GMT-5"; // e.g. "GMT-4"
+  const hours = Number(off.replace("GMT", "") || 0);
+  return new Date(guess.getTime() - hours * 3_600_000).toISOString();
 }

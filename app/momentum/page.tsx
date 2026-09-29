@@ -6,7 +6,8 @@ import { getMomConfig, loadCalendar } from "@/lib/momentum/jobs";
 import { addTradingDays } from "@/lib/momentum/calendar";
 import { planPortfolio, type Candidate, type Plan } from "@/lib/momentum/sizing";
 import type { Regime } from "@/lib/momentum/regime";
-import { clearFlag, saveMomConfig, uploadEarnings } from "./actions";
+import { clearFlag, dropTicket, fillTicket, quoteTickets, saveMomConfig, uploadEarnings } from "./actions";
+import type { Ticket } from "@/lib/momentum/tickets";
 
 export const dynamic = "force-dynamic";
 
@@ -39,6 +40,11 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
     db().from("ss_splits").select("ticker", { count: "exact", head: true }).eq("needs_repair", true).is("repaired_at", null),
   ]);
   const rows = (snap.data ?? []) as Snap[];
+  const [{ data: openTix }, { data: altTix }, { data: doneTix }] = await Promise.all([
+    db().from("ss_mom_tickets").select("*").eq("side", "buy").eq("status", "open").order("trade_date").order("comp_rank"),
+    db().from("ss_mom_tickets").select("*").eq("side", "buy").eq("status", "alternate").order("signal_date", { ascending: false }).order("alt_order"),
+    db().from("ss_mom_tickets").select("*").eq("side", "buy").in("status", ["filled", "dropped", "cancelled"]).order("updated_at", { ascending: false }).limit(15),
+  ]);
   const plan = run ? await buildPlan(run.signal_date, cfg, (run.regime as Regime | null)?.riskOn ?? null) : null;
   const allFlags = (flags.data ?? []) as Flag[];
   const blocking = allFlags.filter((f) => f.excludes);
@@ -57,7 +63,7 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
       </div>
       <p className="muted">
         Monthly momentum rotation: rank liquid large caps by 12-1 month momentum and closeness to the 52-week high, hold the top N
-        while SPY is above its 10-month average. Tickets, stops and the journal come in the next build steps.
+        while SPY is above its 10-month average. Trailing stops, exits, tax rules and the journal come in the next build steps.
       </p>
 
       {cfg.B < cfg.min_B_stock_version && (
@@ -134,6 +140,8 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
           </tbody>
         </table>
       </div>
+
+      <TicketsSection open={(openTix ?? []) as Ticket[]} alternates={(altTix ?? []) as Ticket[]} done={(doneTix ?? []) as Ticket[]} cfg={cfg} />
 
       {plan && <PlanSection plan={plan} kind={run?.kind} signalDate={run?.signal_date} chase={cfg.chase_cap_pct} />}
 
@@ -272,6 +280,96 @@ function PlanSection({ plan, kind, signalDate, chase }: { plan: Plan; kind?: str
         <details className="panel">
           <summary>Skipped ({plan.skipped.length})</summary>
           <ul>{plan.skipped.map((k) => <li key={k.ticker}>{k.ticker} (#{k.comp_rank}): {k.reason}</li>)}</ul>
+        </details>
+      )}
+    </>
+  );
+}
+
+function TicketsSection({ open, alternates, done, cfg }: { open: Ticket[]; alternates: Ticket[]; done: Ticket[]; cfg: Awaited<ReturnType<typeof getMomConfig>> }) {
+  const tradeDay = open[0]?.trade_date;
+  const chrome =
+    `At 9:45 AM ET, open my brokerage account and look up the current bid and ask for these tickers: ${open.map((t) => t.ticker).join(", ")}. ` +
+    `Then open the Momentum tab of my stock screener, find the "Tickets" table and, for each ticker, type the bid into its Bid box and the ask into its Ask box ` +
+    `(the boxes are labelled "<TICKER> bid" and "<TICKER> ask"). Click "Calculate limits" and read me back each ticker's LP1, LP2 and shares. Do not place any orders.`;
+  return (
+    <>
+      <h2>Tickets{tradeDay ? ` for ${tradeDay}` : ""}</h2>
+      {!open.length ? (
+        <p className="muted">No open buy tickets. They are created the morning after a week-end or month-end signal (6:15am ET) while the regime is risk-on and slots are free.</p>
+      ) : (
+        <>
+          <ol className="muted" style={{ paddingLeft: 18 }}>
+            <li>Sells first at 9:45 ET; place buys after the sells fill.</li>
+            <li>At 9:45 enter each bid and ask below and press Calculate limits.</li>
+            <li>Place a day limit at LP1. After 15 minutes unfilled, move it to LP2 and leave it working until 3:45 PM, then cancel.</li>
+            <li>If the ask is above the cap there is no buy today; the ticket retries next session with the same cap. On retry day {cfg.entry_retry_reset_day} the entry test is re-checked (S resets if it passes; otherwise the next alternate takes the slot). After {cfg.entry_max_retry_days} sessions unfilled it is dropped.</li>
+            <li>Alternative: a broker VWAP order 9:45–11:00 ET with its limit at the cap.</li>
+            <li>Cash account: don&apos;t sell a new position before the cash used to buy it has settled (T+1).</li>
+          </ol>
+          <form action={quoteTickets}>
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr><th>Ticker</th><th>Rank</th><th>Retry</th><th>S</th><th>Cap</th><th>Target T</th><th>Bid</th><th>Ask</th><th>LP1</th><th>Shares @LP1</th><th>LP2</th><th>Shares @LP2</th><th style={{ textAlign: "left" }}>Note</th></tr>
+                </thead>
+                <tbody>
+                  {open.map((t) => (
+                    <tr key={t.id}>
+                      <td><Link href={`/t/${t.ticker}`}><b>{t.ticker}</b></Link><input type="hidden" name="id" value={t.id} /></td>
+                      <td>{t.comp_rank}</td>
+                      <td>{t.retry_day}/{cfg.entry_max_retry_days}</td>
+                      <td>{num(t.s_close)}</td>
+                      <td>{num(t.cap)}</td>
+                      <td>{money(t.t_target)}</td>
+                      <td><input name={`bid_${t.id}`} aria-label={`${t.ticker} bid`} inputMode="decimal" defaultValue={t.bid ?? ""} style={{ width: 84 }} /></td>
+                      <td><input name={`ask_${t.id}`} aria-label={`${t.ticker} ask`} inputMode="decimal" defaultValue={t.ask ?? ""} style={{ width: 84 }} /></td>
+                      <td className="score">{t.lp1 != null ? num(t.lp1) : "—"}</td>
+                      <td>{t.shares_lp1 ?? "—"}</td>
+                      <td>{t.lp2 != null ? num(t.lp2) : "—"}</td>
+                      <td>{t.shares_lp2 ?? "—"}</td>
+                      <td style={{ textAlign: "left", whiteSpace: "normal", minWidth: 200 }}>{t.note}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <button type="submit" style={{ marginTop: 8 }}>Calculate limits</button>
+          </form>
+
+          <h3>Record fills</h3>
+          <div className="card-list">
+            {open.map((t) => (
+              <div key={t.id} className="row panel">
+                <b style={{ minWidth: 60 }}>{t.ticker}</b>
+                <form action={fillTicket} className="row">
+                  <input type="hidden" name="id" value={t.id} />
+                  <label>Avg fill F<input name="price" inputMode="decimal" style={{ width: 90 }} /></label>
+                  <label>Shares<input name="shares" inputMode="decimal" defaultValue={t.shares_lp1 ?? t.planned_shares ?? ""} style={{ width: 80 }} /></label>
+                  <label>Time (NY)<input type="datetime-local" name="filled_at" /></label>
+                  <button type="submit" style={{ alignSelf: "flex-end" }}>Filled</button>
+                </form>
+                <form action={dropTicket}>
+                  <input type="hidden" name="id" value={t.id} />
+                  <button type="submit" className="danger">Drop → next alternate</button>
+                </form>
+              </div>
+            ))}
+          </div>
+
+          <details className="panel" style={{ marginTop: 12 }}>
+            <summary>Claude in Chrome prompt (copy at 9:45)</summary>
+            <textarea readOnly value={chrome} rows={5} style={{ width: "100%", marginTop: 8 }} />
+          </details>
+        </>
+      )}
+      {alternates.length > 0 && (
+        <p><b>Alternates:</b> {alternates.map((a) => `${a.ticker} (#${a.comp_rank})`).join(", ")}</p>
+      )}
+      {done.length > 0 && (
+        <details className="panel" style={{ marginTop: 12 }}>
+          <summary>Recent tickets ({done.length})</summary>
+          <ul>{done.map((t) => <li key={t.id}>{t.ticker} · {t.status} · {t.signal_date} {t.kind}{t.note ? ` · ${t.note}` : ""}</li>)}</ul>
         </details>
       )}
     </>

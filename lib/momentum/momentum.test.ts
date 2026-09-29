@@ -164,3 +164,44 @@ test("plan: sector dollar cap, rule 6.7 skip, earnings watch, risk-off", () => {
   assert.match(off.message!, /risk-off/);
   assert.match(planPortfolio({ cfg: { ...cfg, B: 7_000 }, candidates: others, riskOn: true }).message!, /ETF/);
 });
+
+import { advanceTicket, buyLimits, exitLimits, fillLevels, sharesAt, type TicketState } from "./orders.ts";
+
+test("buy and exit limits (spec worked example)", () => {
+  const r = buyLimits(85.4, 85.48, 87.55);
+  assert.ok(!("error" in r) && !r.noBuy);
+  if (!("error" in r) && !r.noBuy) assert.deepEqual([r.lp1, r.lp2], [85.46, 85.48]);
+  const capped = buyLimits(87.4, 87.6, 87.55);
+  assert.ok(!("error" in capped) && capped.noBuy);
+  const tight = buyLimits(87.5, 87.55, 87.55);
+  assert.ok(!("error" in tight) && !tight.noBuy && tight.lp2 === 87.55 && tight.lp1 <= 87.55);
+  assert.ok("error" in buyLimits(0, 1, 2));
+  assert.deepEqual(exitLimits(92.8, 93.0), { xp1: 92.85, xp2: 92.8 });
+  const s = sharesAt(1613.89, 85.46, 3.1, { ...MOM_DEFAULTS });
+  assert.deepEqual([Math.round(s.D * 100) / 100, s.shares], [9.3, 18]);
+});
+
+test("fill levels: D fixed from ATR at signal, Stop0, disaster stop, long-term date", () => {
+  const lv = fillLevels(85.46, 3.1, "2026-10-01", MOM_DEFAULTS);
+  assert.deepEqual(lv, { D: 9.3, stop0: 76.16, disaster: 71.51, ltDate: "2027-10-02" });
+  // D clamps to 10% / 20% of F.
+  assert.equal(fillLevels(100, 1, "2026-10-01", MOM_DEFAULTS).D, 10);
+  assert.equal(fillLevels(100, 10, "2026-10-01", MOM_DEFAULTS).D, 20);
+});
+
+test("ticket retries: same cap, day-3 reset or drop, drop after 5 sessions", () => {
+  const cfg = MOM_DEFAULTS;
+  const t0: TicketState = { status: "open", retry_day: 1, trade_date: "2026-10-01", s_close: 50, cap: 51.5 };
+  const d2 = advanceTicket(t0, "2026-10-02", { entry_ok: true, close: 55 }, cfg);
+  assert.deepEqual([d2.retry_day, d2.cap, d2.trade_date, d2.promote], [2, 51.5, "2026-10-02", false]);
+  const d3 = advanceTicket(d2, "2026-10-05", { entry_ok: true, close: 55 }, cfg);
+  assert.deepEqual([d3.retry_day, d3.s_close, d3.cap, d3.status], [3, 55, 56.65, "open"]);
+  const fail3 = advanceTicket(d2, "2026-10-05", { entry_ok: false, close: 55 }, cfg);
+  assert.deepEqual([fail3.status, fail3.promote], ["dropped", true]);
+  const d5: TicketState = { ...d3, retry_day: 5, trade_date: "2026-10-07" };
+  const d6 = advanceTicket(d5, "2026-10-08", { entry_ok: true, close: 55 }, cfg);
+  assert.deepEqual([d6.status, d6.promote], ["dropped", true]);
+  // Same session or already filled: no change.
+  assert.equal(advanceTicket(t0, "2026-10-01", null, cfg).retry_day, 1);
+  assert.equal(advanceTicket({ ...t0, status: "filled" }, "2026-10-02", null, cfg).status, "filled");
+});

@@ -5,7 +5,8 @@ import { dailyRange, newsForDay, splitsSince, upcomingHolidays } from "../massiv
 import { addDays, nyToday } from "../dates";
 import { LONG_HISTORY_DAYS, REGIME_TICKER } from "../jobs";
 import { capitalAndSlots, normalizeMomConfig, type MomConfig } from "./config";
-import { isMonthEnd, isWeekEnd, type Calendar } from "./calendar";
+import { isMonthEnd, isWeekEnd, nextTradingDay, type Calendar } from "./calendar";
+import { advanceTickets, createTickets } from "./tickets";
 import { regimeAt, type Regime } from "./regime";
 import { buyoutHits } from "./news";
 
@@ -135,5 +136,10 @@ export async function momentumBuild(t?: string) {
   if (error) throw new Error(`ss_mom_build: ${error.message}`);
   const regime: Regime = regimeAt(await spyBars(latest), latest, cal, cfg.regime_sma_months);
   await db().from("ss_mom_runs").update({ regime }).eq("signal_date", latest).eq("kind", kind);
-  return { signalDate: latest, kind, N, regime: { riskOn: regime.riskOn, close: regime.close, sma: regime.sma }, ...(data as object) };
+  // Tickets work the next session: roll unfilled ones forward first, then add this plan's buys.
+  // Weekly refills use the regime as of the last month-end (it isn't re-checked weekly).
+  const tradeDay = nextTradingDay(cal, latest);
+  const advanced = await advanceTickets(latest, tradeDay, cfg, cal);
+  const tickets = kind === "daily" ? null : await createTickets(latest, kind, cfg, regime.riskOn, tradeDay, cal);
+  return { signalDate: latest, kind, N, tradeDay, regime: { riskOn: regime.riskOn, close: regime.close, sma: regime.sma }, advanced, tickets, ...(data as object) };
 }
