@@ -3,7 +3,8 @@ import { revalidatePath } from "next/cache";
 import { db, upsertChunks } from "@/lib/db";
 import { MOM_DEFAULTS, normalizeMomConfig, type MomKey } from "@/lib/momentum/config";
 import { getMomConfig, loadCalendar, setMomConfig } from "@/lib/momentum/jobs";
-import { buyLimits, sharesAt } from "@/lib/momentum/orders";
+import { buyLimits, exitLimits, sharesAt } from "@/lib/momentum/orders";
+import { recordExit } from "@/lib/momentum/positions";
 import { promoteAlternate, recordFill } from "@/lib/momentum/tickets";
 
 export async function saveMomConfig(form: FormData) {
@@ -107,4 +108,33 @@ function nyLocalToIso(local: string): string {
     .formatToParts(guess).find((p) => p.type === "timeZoneName")?.value ?? "GMT-5"; // e.g. "GMT-4"
   const hours = Number(off.replace("GMT", "") || 0);
   return new Date(guess.getTime() - hours * 3_600_000).toISOString();
+}
+
+/** 09:45 quotes for open sell tickets → XP1 (mid − ¼ spread) and XP2 (bid). */
+export async function quoteExits(form: FormData) {
+  for (const id of form.getAll("id").map(Number).filter(Boolean)) {
+    const bid = Number(form.get(`bid_${id}`)), ask = Number(form.get(`ask_${id}`));
+    if (!(bid > 0) || !(ask >= bid)) continue;
+    const { xp1, xp2 } = exitLimits(bid, ask);
+    await db().from("ss_mom_tickets").update({ bid, ask, xp1, xp2, quoted_at: new Date().toISOString(), updated_at: new Date().toISOString() }).eq("id", id);
+  }
+  revalidatePath("/momentum");
+}
+
+export async function exitTicket(form: FormData) {
+  const id = Number(form.get("id"));
+  const price = Number(form.get("price"));
+  const fees = Number(form.get("fees") || 0);
+  const at = String(form.get("exited_at") || "");
+  if (!(id > 0) || !(price > 0) || !(fees >= 0)) throw new Error("Enter the average exit price (and fees, if any).");
+  await recordExit(id, price, fees, at ? nyLocalToIso(at) : new Date().toISOString(), await loadCalendar());
+  revalidatePath("/momentum");
+}
+
+/** The disaster stop shown was placed (or moved) at the broker as a GTC stop-market order. */
+export async function markDisasterPosted(form: FormData) {
+  const ids = form.getAll("lot").map(Number).filter(Boolean);
+  const { data } = await db().from("ss_mom_lots").select("id, disaster_stop").in("id", ids);
+  for (const l of data ?? []) await db().from("ss_mom_lots").update({ disaster_posted: l.disaster_stop }).eq("id", l.id);
+  revalidatePath("/momentum");
 }

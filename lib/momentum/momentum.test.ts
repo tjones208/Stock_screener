@@ -205,3 +205,60 @@ test("ticket retries: same cap, day-3 reset or drop, drop after 5 sessions", () 
   assert.equal(advanceTicket(t0, "2026-10-01", null, cfg).retry_day, 1);
   assert.equal(advanceTicket({ ...t0, status: "filled" }, "2026-10-02", null, cfg).status, "filled");
 });
+
+import { disasterStop, exitResult, pickLots, reviewPosition, topUpShares, trailStop, type Lot, type Position } from "./stops.ts";
+
+test("trailing stop, disaster stop and stop exit (spec worked example)", () => {
+  const cfg = MOM_DEFAULTS;
+  let stop = 76.16;
+  stop = trailStop(stop, 102.3, 9.3);
+  assert.equal(stop, 93.0);
+  assert.equal(disasterStop(stop, 9.3, cfg), 88.35);
+  // Never lower: a lower high close later can't pull the stop down.
+  assert.equal(trailStop(stop, 95, 9.3), 93.0);
+  const lot: Lot = { id: 1, ticker: "X", shares: 18, fill_price: 85.46, d: 9.3, stop: 93.0, filled_at: "2026-10-01T14:00:00Z", lt_date: "2027-10-02" };
+  const p: Position = { ticker: "X", lots: [lot], close: 92.8, active: true, holdOk: true, buyoutNews: null, target: null, entryOk: true };
+  const o = reviewPosition(p, { monthEnd: false, riskOn: true, cfg })!;
+  assert.deepEqual([o.trigger, o.shares, o.urgent], [2, 18, true]);
+  assert.deepEqual(exitResult(lot, 92.9, 18, 0, "2026-11-02"), { pnl: 133.92, r: 0.8, term: "ST" });
+  assert.equal(exitResult(lot, 92.9, 18, 0, "2027-10-02").term, "LT");
+});
+
+const lotAt = (id: number, fill: number, shares = 10, stop = 1): Lot =>
+  ({ id, ticker: "Y", shares, fill_price: fill, d: 5, stop, filled_at: "2026-10-01T14:00:00Z", lt_date: "2027-10-02" });
+const pos = (o: Partial<Position> = {}): Position =>
+  ({ ticker: "Y", lots: [lotAt(1, 50)], close: 60, active: true, holdOk: true, buyoutNews: null, target: 600, entryOk: true, ...o });
+
+test("exit triggers in spec order; month-end-only triggers wait for month-end", () => {
+  const cfg = MOM_DEFAULTS;
+  const me = { monthEnd: true, riskOn: true, cfg };
+  // Regime turns risk-off at month-end → sell everything (beats every other trigger).
+  assert.equal(reviewPosition(pos({ close: 0.5, holdOk: false }), { ...me, riskOn: false })!.trigger, 1);
+  // Mid-month risk-off does nothing (the regime is monthly only).
+  assert.equal(reviewPosition(pos(), { monthEnd: false, riskOn: false, cfg }), null);
+  assert.equal(reviewPosition(pos({ close: 0.9, holdOk: false }), me)!.trigger, 2);
+  assert.equal(reviewPosition(pos({ holdOk: false }), me)!.trigger, 3);
+  assert.equal(reviewPosition(pos({ holdOk: null }), me)!.trigger, 3);
+  assert.equal(reviewPosition(pos({ holdOk: false }), { ...me, monthEnd: false }), null);
+  const b = reviewPosition(pos({ buyoutNews: "2026-10-05" }), { ...me, monthEnd: false })!;
+  assert.deepEqual([b.trigger, b.deadlineDays], [4, 5]);
+  assert.equal(reviewPosition(pos({ close: null }), { ...me, monthEnd: false })!.trigger, 5);
+  assert.equal(reviewPosition(pos({ active: false }), { ...me, monthEnd: false })!.trigger, 5);
+});
+
+test("trim over 2× target back to 1.5×, losing lots first then highest cost; top-up under 0.5×", () => {
+  const cfg = MOM_DEFAULTS;
+  // 3 lots, 30 shares at $60 = $1,800 vs target $600 → trim to $900 = 15 shares, sell 15.
+  const lots = [lotAt(1, 40), lotAt(2, 70), lotAt(3, 55)];
+  const o = reviewPosition(pos({ lots, target: 600 }), { monthEnd: true, riskOn: true, cfg })!;
+  assert.equal(o.trigger, 7);
+  assert.equal(o.shares, 15);
+  assert.deepEqual(o.lots, [{ id: 2, shares: 10 }, { id: 3, shares: 5 }]); // $70 lot is a loss at $60 → first; then $55 (highest cost)
+  assert.deepEqual(pickLots(lots, 12, 60, false).map((l) => l.id), [2, 3]);
+  // Not over 2×: no trim.
+  assert.equal(reviewPosition(pos({ lots: [lotAt(1, 50, 20)], target: 700 }), { monthEnd: true, riskOn: true, cfg }), null);
+  // $240 held vs $600 target (< 0.5×) and still entry-eligible → buy 6 more at $60.
+  assert.equal(topUpShares(pos({ lots: [lotAt(1, 50, 4)] }), cfg), 6);
+  assert.equal(topUpShares(pos({ lots: [lotAt(1, 50, 4)], entryOk: false }), cfg), 0);
+  assert.equal(topUpShares(pos({ lots: [lotAt(1, 50, 6)] }), cfg), 0);
+});

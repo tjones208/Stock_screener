@@ -6,7 +6,8 @@ import { getMomConfig, loadCalendar } from "@/lib/momentum/jobs";
 import { addTradingDays } from "@/lib/momentum/calendar";
 import { planPortfolio, type Candidate, type Plan } from "@/lib/momentum/sizing";
 import type { Regime } from "@/lib/momentum/regime";
-import { clearFlag, dropTicket, fillTicket, quoteTickets, saveMomConfig, uploadEarnings } from "./actions";
+import { clearFlag, dropTicket, exitTicket, fillTicket, markDisasterPosted, quoteExits, quoteTickets, saveMomConfig, uploadEarnings } from "./actions";
+import { TRIGGER_LABEL } from "@/lib/momentum/stops";
 import type { Ticket } from "@/lib/momentum/tickets";
 
 export const dynamic = "force-dynamic";
@@ -45,6 +46,13 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
     db().from("ss_mom_tickets").select("*").eq("side", "buy").eq("status", "alternate").order("signal_date", { ascending: false }).order("alt_order"),
     db().from("ss_mom_tickets").select("*").eq("side", "buy").in("status", ["filled", "dropped", "cancelled"]).order("updated_at", { ascending: false }).limit(15),
   ]);
+  const { data: lotRows } = await db().from("ss_mom_lots").select("*").is("exit_date", null).order("ticker").order("filled_at");
+  const lots = (lotRows ?? []) as LotView[];
+  const { data: lastBars } = lots.length
+    ? await db().from("ss_indicators").select("ticker, close, as_of").in("ticker", [...new Set(lots.map((l) => l.ticker))])
+    : { data: [] };
+  const lastClose = new Map((lastBars ?? []).map((b) => [b.ticker, b.close as number]));
+  const { data: sellRows } = await db().from("ss_mom_tickets").select("*").eq("side", "sell").eq("status", "open").order("urgent", { ascending: false }).order("ticker");
   const plan = run ? await buildPlan(run.signal_date, cfg, (run.regime as Regime | null)?.riskOn ?? null) : null;
   const allFlags = (flags.data ?? []) as Flag[];
   const blocking = allFlags.filter((f) => f.excludes);
@@ -63,7 +71,7 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
       </div>
       <p className="muted">
         Monthly momentum rotation: rank liquid large caps by 12-1 month momentum and closeness to the 52-week high, hold the top N
-        while SPY is above its 10-month average. Trailing stops, exits, tax rules and the journal come in the next build steps.
+        while SPY is above its 10-month average. Tax rules, buying-power changes and the journal reports come in the next build steps.
       </p>
 
       {cfg.B < cfg.min_B_stock_version && (
@@ -140,6 +148,9 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
           </tbody>
         </table>
       </div>
+
+      <ExitSection sells={(sellRows ?? []) as SellTicket[]} />
+      <PositionsSection lots={lots} lastClose={lastClose} weekly={run?.kind === "weekly" || run?.kind === "monthly"} />
 
       <TicketsSection open={(openTix ?? []) as Ticket[]} alternates={(altTix ?? []) as Ticket[]} done={(doneTix ?? []) as Ticket[]} cfg={cfg} />
 
@@ -371,6 +382,125 @@ function TicketsSection({ open, alternates, done, cfg }: { open: Ticket[]; alter
           <summary>Recent tickets ({done.length})</summary>
           <ul>{done.map((t) => <li key={t.id}>{t.ticker} · {t.status} · {t.signal_date} {t.kind}{t.note ? ` · ${t.note}` : ""}</li>)}</ul>
         </details>
+      )}
+    </>
+  );
+}
+
+type LotView = {
+  id: number; ticker: string; shares: number; fill_price: number; filled_at: string; d: number; stop0: number; stop: number;
+  highest_close: number | null; disaster_stop: number; disaster_posted: number | null; lt_date: string; earnings_date: string | null;
+};
+type SellTicket = {
+  id: number; ticker: string; exit_trigger: number; shares_to_sell: number; urgent: boolean; deadline: string | null; trade_date: string;
+  signal_date: string; bid: number | null; ask: number | null; xp1: number | null; xp2: number | null; note: string | null;
+};
+
+function ExitSection({ sells }: { sells: SellTicket[] }) {
+  if (!sells.length) return null;
+  const chrome =
+    `At 9:45 AM ET, open my brokerage account and look up the current bid and ask for: ${sells.map((t) => t.ticker).join(", ")}. ` +
+    `Then open the Momentum tab of my stock screener, find the "Exit tickets" table, type each bid and ask into the boxes labelled "<TICKER> exit bid" / "<TICKER> exit ask", ` +
+    `click "Calculate exit limits" and read me back XP1 and XP2 for each. Do not place any orders.`;
+  return (
+    <>
+      <h2>Exit tickets for {sells[0].trade_date}</h2>
+      <p className="muted">
+        Sells go first at 9:45 ET: limit at XP1; after 10 minutes move to XP2 (the bid); after another 20 minutes sell at market.
+        Stop, regime, acquisition and halt exits must be out the same session, even if the stock gaps below the stop.
+      </p>
+      <form action={quoteExits}>
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>Ticker</th><th>Why</th><th>Shares</th><th>Out by</th><th>Bid</th><th>Ask</th><th>XP1</th><th>XP2</th><th style={{ textAlign: "left" }}>Detail</th></tr></thead>
+            <tbody>
+              {sells.map((t) => (
+                <tr key={t.id}>
+                  <td><Link href={`/t/${t.ticker}`}><b>{t.ticker}</b></Link><input type="hidden" name="id" value={t.id} /></td>
+                  <td className={t.urgent ? "down" : ""}>{t.exit_trigger}. {TRIGGER_LABEL[t.exit_trigger]}</td>
+                  <td>{t.shares_to_sell}</td>
+                  <td>{t.urgent && t.exit_trigger !== 4 ? "Same day" : t.deadline}</td>
+                  <td><input name={`bid_${t.id}`} aria-label={`${t.ticker} exit bid`} inputMode="decimal" defaultValue={t.bid ?? ""} style={{ width: 84 }} /></td>
+                  <td><input name={`ask_${t.id}`} aria-label={`${t.ticker} exit ask`} inputMode="decimal" defaultValue={t.ask ?? ""} style={{ width: 84 }} /></td>
+                  <td className="score">{t.xp1 != null ? num(t.xp1) : "—"}</td>
+                  <td>{t.xp2 != null ? num(t.xp2) : "—"}</td>
+                  <td style={{ textAlign: "left", whiteSpace: "normal", minWidth: 220 }}>{t.note}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <button type="submit" style={{ marginTop: 8 }}>Calculate exit limits</button>
+      </form>
+      <h3>Record exits</h3>
+      <div className="card-list">
+        {sells.map((t) => (
+          <form key={t.id} action={exitTicket} className="row panel">
+            <b style={{ minWidth: 60 }}>{t.ticker}</b>
+            <input type="hidden" name="id" value={t.id} />
+            <label>Avg exit X<input name="price" inputMode="decimal" style={{ width: 90 }} /></label>
+            <label>Fees $<input name="fees" inputMode="decimal" defaultValue="0" style={{ width: 70 }} /></label>
+            <label>Time (NY)<input type="datetime-local" name="exited_at" /></label>
+            <button type="submit" style={{ alignSelf: "flex-end" }}>Sold {t.shares_to_sell}</button>
+          </form>
+        ))}
+      </div>
+      <details className="panel" style={{ marginTop: 12 }}>
+        <summary>Claude in Chrome prompt for exits</summary>
+        <textarea readOnly value={chrome} rows={4} style={{ width: "100%", marginTop: 8 }} />
+      </details>
+    </>
+  );
+}
+
+function PositionsSection({ lots, lastClose, weekly }: { lots: LotView[]; lastClose: Map<string, number>; weekly: boolean }) {
+  if (!lots.length) return null;
+  const stale = lots.filter((l) => l.disaster_posted == null || Math.abs(l.disaster_posted - l.disaster_stop) > 0.004);
+  return (
+    <>
+      <h2>Positions ({lots.length} lots)</h2>
+      {weekly && stale.length > 0 && (
+        <div className="notice">
+          Friday disaster-stop update: move the broker GTC stop-market orders for {stale.map((l) => `${l.ticker} → ${num(l.disaster_stop)}`).join(", ")}.
+        </div>
+      )}
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Ticker</th><th>Entry</th><th>Shares</th><th>F</th><th>D</th><th>Stop0</th><th>High close</th><th>Stop</th><th>Disaster</th><th>At broker</th><th>Close</th><th>P&amp;L</th><th>R</th><th>Earnings</th><th>LT date</th></tr>
+          </thead>
+          <tbody>
+            {lots.map((l) => {
+              const c = lastClose.get(l.ticker);
+              const pnl = c != null ? (c - l.fill_price) * l.shares : null;
+              return (
+                <tr key={l.id}>
+                  <td><Link href={`/t/${l.ticker}`}><b>{l.ticker}</b></Link></td>
+                  <td>{l.filled_at.slice(0, 10)}</td>
+                  <td>{l.shares}</td>
+                  <td>{num(l.fill_price)}</td>
+                  <td>{num(l.d)}</td>
+                  <td>{num(l.stop0)}</td>
+                  <td>{num(l.highest_close)}</td>
+                  <td className="score">{num(l.stop)}</td>
+                  <td>{num(l.disaster_stop)}</td>
+                  <td className={l.disaster_posted != null && Math.abs(l.disaster_posted - l.disaster_stop) <= 0.004 ? "up" : "down"}>{l.disaster_posted != null ? num(l.disaster_posted) : "not set"}</td>
+                  <td>{num(c)}</td>
+                  <td className={pnl != null && pnl < 0 ? "down" : "up"}>{money(pnl)}</td>
+                  <td>{c != null ? num((c - l.fill_price) / l.d) : "—"}</td>
+                  <td>{l.earnings_date ?? "—"}</td>
+                  <td>{l.lt_date}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      {stale.length > 0 && (
+        <form action={markDisasterPosted} style={{ marginTop: 8 }}>
+          {stale.map((l) => <input key={l.id} type="hidden" name="lot" value={l.id} />)}
+          <button type="submit" className="ghost">I&apos;ve placed these disaster stops at the broker</button>
+        </form>
       )}
     </>
   );

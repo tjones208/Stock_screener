@@ -26,20 +26,40 @@ async function snapshot(t: string): Promise<SnapRow[]> {
 
 /** Open lots plus live buy tickets from other plans: both occupy slots and count toward sector caps. */
 async function occupied(excludePlan?: { signal_date: string; kind: string }): Promise<Held[]> {
-  const [{ data: lots }, { data: tix }] = await Promise.all([
+  const [{ data: allLots }, { data: tix }, { data: sells }] = await Promise.all([
     db().from("ss_mom_lots").select("ticker, shares, fill_price, sigma63").is("exit_date", null),
-    db().from("ss_mom_tickets").select("ticker, sector, sigma63, t_target, signal_date, kind").eq("side", "buy").eq("status", "open"),
+    db().from("ss_mom_tickets").select("ticker, sector, sigma63, t_target, signal_date, kind").eq("side", "buy").eq("status", "open").neq("kind", "topup"),
+    db().from("ss_mom_tickets").select("ticker, exit_trigger").eq("side", "sell").eq("status", "open"),
   ]);
-  const { data: tk } = await db().from("ss_tickers").select("ticker, sic_code").in("ticker", (lots ?? []).map((l) => l.ticker));
+  // Exit review runs first: positions with an open full-exit ticket (any trigger but a trim) aren't kept.
+  const leaving = new Set((sells ?? []).filter((x) => x.exit_trigger !== 7).map((x) => x.ticker));
+  const lots = (allLots ?? []).filter((l) => !leaving.has(l.ticker));
+  const { data: tk } = await db().from("ss_tickers").select("ticker, sic_code").in("ticker", lots.map((l) => l.ticker));
   const sic = new Map((tk ?? []).map((t) => [t.ticker, t.sic_code as string | null]));
-  const held: Held[] = (lots ?? []).map((l) => ({
+  const held: Held[] = lots.map((l) => ({
     ticker: l.ticker, sigma63: l.sigma63, sic2: sic.get(l.ticker)?.slice(0, 2) ?? null, value: l.shares * l.fill_price,
   }));
+  // Several lots of one ticker (top-ups) are one holding.
+  const merged = new Map<string, Held>();
+  for (const h of held) {
+    const m = merged.get(h.ticker);
+    if (m) m.value += h.value; else merged.set(h.ticker, { ...h });
+  }
+  held.splice(0, held.length, ...merged.values());
   for (const t of tix ?? []) {
     if (excludePlan && t.signal_date === excludePlan.signal_date && t.kind === excludePlan.kind) continue;
     held.push({ ticker: t.ticker, sigma63: t.sigma63, sic2: t.sector === "unknown" ? null : t.sector, value: t.t_target ?? 0 });
   }
   return held;
+}
+
+/** Tickers never offered as new buys: already owned (any open lot) or being sold. */
+async function ownedOrSelling(): Promise<Set<string>> {
+  const [{ data: lots }, { data: sells }] = await Promise.all([
+    db().from("ss_mom_lots").select("ticker").is("exit_date", null),
+    db().from("ss_mom_tickets").select("ticker").eq("side", "sell").eq("status", "open"),
+  ]);
+  return new Set([...(lots ?? []), ...(sells ?? [])].map((x) => x.ticker));
 }
 
 async function earningsWithin(cal: Calendar, t: string, cfg: MomConfig): Promise<Set<string>> {
@@ -58,8 +78,8 @@ export async function createTickets(t: string, kind: "weekly" | "monthly", cfg: 
   }
   const { count } = await db().from("ss_mom_tickets").select("id", { count: "exact", head: true }).eq("signal_date", t).eq("kind", kind);
   if (count) return { created: 0, existing: count };
-  const [snap, held, earnings] = await Promise.all([snapshot(t), occupied(), earningsWithin(cal, t, cfg)]);
-  const plan = planPortfolio({ cfg, candidates: snap, held, riskOn, earnings });
+  const [snap, held, earnings, busy] = await Promise.all([snapshot(t), occupied(), earningsWithin(cal, t, cfg), ownedOrSelling()]);
+  const plan = planPortfolio({ cfg, candidates: snap.filter((x) => !busy.has(x.ticker)), held, riskOn, earnings });
   const byTicker = new Map(snap.map((s) => [s.ticker, s]));
   const rows = [
     ...plan.buys.map((b) => ({
@@ -90,10 +110,10 @@ export async function promoteAlternate(plan: { signal_date: string; kind: string
   const { data: mine } = await db().from("ss_mom_tickets").select("id, ticker, status").eq("signal_date", plan.signal_date).eq("kind", plan.kind).eq("side", "buy");
   const dropped = new Set((mine ?? []).filter((m) => m.status === "dropped" || m.status === "cancelled").map((m) => m.ticker));
   const live = new Set((mine ?? []).filter((m) => m.status === "open" || m.status === "filled").map((m) => m.ticker));
-  const [snap, held, earnings] = await Promise.all([snapshot(plan.signal_date), occupied(plan), earningsWithin(cal, plan.signal_date, cfg)]);
+  const [snap, held, earnings, busy] = await Promise.all([snapshot(plan.signal_date), occupied(plan), earningsWithin(cal, plan.signal_date, cfg), ownedOrSelling()]);
   // This plan's filled names are already lots (in `held`); its open ones are re-picked from the snapshot.
   const lots = new Set(held.map((h) => h.ticker));
-  const p = planPortfolio({ cfg, candidates: snap.filter((s) => !dropped.has(s.ticker)), held, riskOn: true, earnings });
+  const p = planPortfolio({ cfg, candidates: snap.filter((s) => !dropped.has(s.ticker) && !busy.has(s.ticker)), held, riskOn: true, earnings });
   const next = p.buys.find((b) => !live.has(b.ticker) && !lots.has(b.ticker));
   if (!next) return null;
   const s = snap.find((x) => x.ticker === next.ticker)!;
@@ -129,7 +149,8 @@ export async function advanceTickets(latestSignal: string, tradeDay: string, cfg
     await db().from("ss_mom_tickets").update(patch).eq("id", t.id);
     if (promote) {
       dropped++;
-      const p = await promoteAlternate(t, tradeDay, cfg, cal);
+      // A dropped top-up just lapses; only new-position slots go to the next name.
+      const p = t.kind === "topup" ? null : await promoteAlternate(t, tradeDay, cfg, cal);
       if (p) promoted.push(p);
     }
   }
@@ -156,6 +177,8 @@ export async function recordFill(ticketId: number, F: number, shares: number, fi
     shares, risk_cap_shares: ticket.risk_cap_shares, lp1: ticket.lp1, lp2: ticket.lp2, fill_price: F, filled_at: filledAt,
     d: lv.D, stop0: lv.stop0, stop: lv.stop0, highest_close: F, disaster_stop: lv.disaster,
     earnings_date: er?.[0]?.report_date ?? null, lt_date: lv.ltDate,
+    slippage_s_bps: ticket.s_close ? Math.round((F / ticket.s_close - 1) * 10_000 * 10) / 10 : null,
+    slippage_lp_bps: ticket.lp1 ? Math.round((F / ticket.lp1 - 1) * 10_000 * 10) / 10 : null,
   });
   if (error) throw new Error(`ss_mom_lots: ${error.message}`);
   await db().from("ss_mom_tickets").update({ status: "filled", updated_at: new Date().toISOString() }).eq("id", ticket.id);
