@@ -16,6 +16,8 @@ const MIN_PRICE = 1;
 /** Bars above this were skipped before the cap was removed; the backfill fills them in once. */
 const OLD_MAX_PRICE = 75;
 const HISTORY_DAYS = 400;
+/** Liquid names (the momentum pool) keep more history: 273+ trading days plus holidays and slack. */
+export const LONG_HISTORY_DAYS = 460;
 /** Market-regime benchmark for strategies that require SPY above its 200-day SMA. */
 export const REGIME_TICKER = "SPY";
 
@@ -92,6 +94,7 @@ export async function ingestDay(
   types?: Map<string, string | null>,
   watch?: Set<string>,
   onlyAboveOldCap = false,
+  only?: Set<string>,
 ) {
   types ??= await tickerTypes();
   watch ??= await watchlistTickers();
@@ -99,6 +102,7 @@ export async function ingestDay(
   const keep = bars.filter((b) => {
     if (onlyAboveOldCap && !(b.c > OLD_MAX_PRICE)) return false;
     if (watch!.has(b.T)) return true;
+    if (only && !only.has(b.T)) return false;
     if (b.c < MIN_PRICE) return false;
     if (types!.size) return KEEP_TYPES.has(types!.get(b.T) ?? "");
     return /^[A-Z]{1,5}$/.test(b.T); // before the first ticker sync: plain symbols only
@@ -117,6 +121,11 @@ export async function ingestDay(
   return keep.length;
 }
 
+export async function longHistoryTickers(): Promise<Set<string>> {
+  const rows = await fetchAll<{ ticker: string }>((a, b) => db().rpc("ss_long_history_tickers").range(a, b));
+  return new Set(rows.map((r) => r.ticker));
+}
+
 /** Make sure the regime benchmark has full history (one range call instead of waiting for the fill). */
 async function ensureRegimeHistory(today: string): Promise<number> {
   const { count } = await db().from("ss_daily_bars").select("d", { count: "exact", head: true }).eq("ticker", REGIME_TICKER);
@@ -131,7 +140,8 @@ async function ensureRegimeHistory(today: string): Promise<number> {
 export async function backfill(budgetMs = 270_000) {
   const left = deadline(budgetMs);
   const today = nyToday();
-  const wanted = weekdaysBack(addDays(today, 1), HISTORY_DAYS);
+  const wanted = weekdaysBack(addDays(today, 1), LONG_HISTORY_DAYS);
+  const shortCutoff = addDays(today, -HISTORY_DAYS);
   const { data: loaded } = await db().from("ss_loaded_days").select("d").gte("d", wanted[wanted.length - 1]);
   const have = new Set((loaded ?? []).map((r) => r.d as string));
   const missing = wanted.filter((d) => !have.has(d) && d < today); // today's bars load in the nightly job
@@ -139,9 +149,12 @@ export async function backfill(budgetMs = 270_000) {
   const watch = await watchlistTickers();
   const regimeBars = await ensureRegimeHistory(today);
   const done: string[] = [];
+  let longSet: Set<string> | undefined;
   for (const d of missing) {
     if (left() < 20_000) break;
-    await ingestDay(d, types, watch);
+    // Days beyond the normal horizon only keep the liquid (long-history) names.
+    if (d < shortCutoff) longSet ??= await longHistoryTickers();
+    await ingestDay(d, types, watch, false, d < shortCutoff ? longSet : undefined);
     done.push(d);
   }
   // One-time fill of bars above the old $75 cap for days loaded before it was removed.
@@ -182,7 +195,7 @@ export async function nightlyEod() {
   if (rows === 0) return { date, rows, note: "no bars (holiday or not published yet)" };
   const { data: updated, error } = await db().rpc("ss_refresh_indicators", { p_as_of: date });
   if (error) throw new Error(`ss_refresh_indicators: ${error.message}`);
-  const { data: pruned, error: pruneError } = await db().rpc("ss_prune_bars", { p_days: HISTORY_DAYS });
+  const { data: pruned, error: pruneError } = await db().rpc("ss_prune_bars", { p_days: HISTORY_DAYS, p_long_days: LONG_HISTORY_DAYS });
   return { date, rows, indicators: updated, pruned, ...(pruneError ? { pruneError: pruneError.message } : {}) };
 }
 
@@ -376,6 +389,7 @@ export async function fundamentalsBatch(count = 2) {
       market_cap: marketCap,
       shares_out: details?.weighted_shares_outstanding ?? details?.share_class_shares_outstanding ?? null,
       sic_code: details?.sic_code ?? null,
+      composite_figi: details?.composite_figi ?? null,
       updated_at: new Date().toISOString(),
     }).eq("ticker", ticker);
     // Only fill sector/industry from SIC when we have nothing better (S&P names carry GICS).

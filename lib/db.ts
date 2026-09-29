@@ -31,9 +31,9 @@ export async function fetchAll<T>(
 }
 
 /** Upsert in chunks so one request never gets too large. */
-export async function upsertChunks(table: string, rows: object[], onConflict: string, chunk = 1000) {
+export async function upsertChunks(table: string, rows: object[], onConflict: string, chunk = 1000, ignoreDuplicates = false) {
   for (let i = 0; i < rows.length; i += chunk) {
-    const { error } = await db().from(table).upsert(rows.slice(i, i + chunk), { onConflict });
+    const { error } = await db().from(table).upsert(rows.slice(i, i + chunk), { onConflict, ignoreDuplicates });
     if (error) throw new Error(`${table}: ${error.message}`);
   }
 }

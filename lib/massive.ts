@@ -70,6 +70,7 @@ export type TickerDetails = {
   weighted_shares_outstanding?: number;
   type?: string;
   primary_exchange?: string;
+  composite_figi?: string;
 };
 
 export async function tickerDetails(ticker: string): Promise<TickerDetails | null> {
@@ -109,4 +110,42 @@ export async function dailyRange(ticker: string, from: string, to: string): Prom
   );
   const nyDate = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" });
   return (r.results ?? []).map((b) => ({ d: nyDate.format(new Date(b.t)), o: b.o, h: b.h, l: b.l, c: b.c, v: b.v, vw: b.vw, n: b.n }));
+}
+
+/** Paged GET that follows next_url (the cursor already carries every other parameter). */
+async function getAll<T>(path: string, params: Record<string, string | number>, maxPages = 50): Promise<T[]> {
+  const out: T[] = [];
+  let next: string | undefined = path;
+  let p = params;
+  for (let i = 0; next && i < maxPages; i++) {
+    const r: { results?: T[]; next_url?: string } = await get(next, p);
+    out.push(...(r.results ?? []));
+    next = r.next_url;
+    p = {};
+  }
+  return out;
+}
+
+export type Split = { ticker: string; execution_date: string; split_from: number; split_to: number };
+
+/** Splits executed on or after `from` (whole market). */
+export function splitsSince(from: string): Promise<Split[]> {
+  return getAll<Split>("/v3/reference/splits", { "execution_date.gte": from, order: "asc", sort: "execution_date", limit: 1000 });
+}
+
+export type MarketHoliday = { date: string; exchange: string; name: string; status: string };
+
+export async function upcomingHolidays(): Promise<MarketHoliday[]> {
+  const r = await get<MarketHoliday[]>("/v1/marketstatus/upcoming");
+  return Array.isArray(r) ? r : [];
+}
+
+export type NewsArticle = { title: string; tickers?: string[]; published_utc: string; article_url: string };
+
+/** All news published on one UTC calendar day (whole market). */
+export function newsForDay(day: string, nextDay: string): Promise<NewsArticle[]> {
+  return getAll<NewsArticle>("/v2/reference/news", {
+    "published_utc.gte": `${day}T00:00:00Z`, "published_utc.lt": `${nextDay}T00:00:00Z`,
+    order: "asc", sort: "published_utc", limit: 1000,
+  });
 }
