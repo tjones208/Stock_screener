@@ -1,5 +1,7 @@
 // Alert rule evaluation. Pure — the nightly job feeds it screener rows and saves the hits.
 import { applyFilters, deathCross, goldenCross, type Filters, type ScreenerRow } from "./screen.ts";
+import { meetsMinRR, STRATEGY_BY_KEY, strategyGate, type MarketRegime } from "./strategies.ts";
+import { levelsFor } from "./levels.ts";
 
 export type AlertRule = {
   id: number;
@@ -72,7 +74,7 @@ function check(rule: AlertRule, r: ScreenerRow): string | null {
 export function evaluateRules(
   rules: AlertRule[],
   rows: ScreenerRow[],
-  ctx: { watchlists: Map<number, Set<string>>; screens: Map<number, Filters> },
+  ctx: { watchlists: Map<number, Set<string>>; screens: Map<number, Filters>; regime?: MarketRegime },
 ): AlertHit[] {
   const byTicker = new Map(rows.map((r) => [r.ticker, r]));
   const hits: AlertHit[] = [];
@@ -90,7 +92,7 @@ export function evaluateRules(
     }
     if (rule.screen_id != null) {
       const f = ctx.screens.get(rule.screen_id);
-      targets = f ? applyFilters(targets, f) : [];
+      targets = f ? applyScreen(targets, f, ctx.regime ?? null) : [];
     } else if (rule.kind === "screen_match") {
       targets = []; // screen_match needs a screen
     }
@@ -100,4 +102,17 @@ export function evaluateRules(
     }
   }
   return hits;
+}
+
+/**
+ * A saved screen as the screener shows it: its filters, plus — when it was saved from a strategy —
+ * that strategy's market-regime gate and minimum reward-to-risk. Keeps alerts from firing on setups
+ * the screener would hide.
+ */
+export function applyScreen(rows: ScreenerRow[], f: Filters, regime: MarketRegime): ScreenerRow[] {
+  const strategy = f.strategy ? STRATEGY_BY_KEY.get(f.strategy) : undefined;
+  if (strategy && !strategyGate(strategy, regime).ok) return [];
+  const matched = applyFilters(rows, f);
+  if (!strategy?.minRR) return matched;
+  return matched.filter((r) => meetsMinRR(strategy, levelsFor(strategy.key, r)));
 }

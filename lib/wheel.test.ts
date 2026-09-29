@@ -315,3 +315,16 @@ test("pullback preset filters: trend stack and slope", () => {
   assert.deepEqual(applyFilters([row({ ...up, ema20_5d: 44.5 })], { ema20_rising: "1" }).length, 0); // falling EMA
   assert.deepEqual(applyFilters([row({ ...up, ema20: 39 })], { ema20_above_sma50: "1" }).length, 0); // not stacked
 });
+
+test("screen alerts respect a strategy's regime gate and 2:1 rule", async () => {
+  const { evaluateRules } = await import("./alerts.ts");
+  // GRDN with a hammer at the 20 EMA (passes every pullback rule, 2.4R) and LILAK with a reclaim (0.7R).
+  const grdn = row({ ...GRDN, close: 42.1, day_open: 41.8, day_low: 40.9, ema20: 42.0, ema20_5d: 41.6, swing_low5: 40.9, rsi14: 47.2, vol_ratio: 1.29, avg_vol20: 699_839 });
+  const lil = row({ ...LILAK, close: 8.6, day_open: 8.5, day_low: 8.5, day_high: 8.62, rsi14: 49.4, vol_ratio: 1.8, avg_vol20: 1_305_800, sma200: 7.5 });
+  const { STRATEGY_BY_KEY, strategyQuery } = await import("./strategies.ts");
+  const f = Object.fromEntries(new URLSearchParams(strategyQuery(STRATEGY_BY_KEY.get("pullback")!)));
+  const rule = { id: 9, name: "Pullback", kind: "screen_match" as const, ticker: null, screen_id: 1, watchlist_id: null, params: {}, enabled: true };
+  const ctx = (close: number) => ({ watchlists: new Map(), screens: new Map([[1, f]]), regime: { ticker: "SPY", close, sma200: 700, as_of: "2026-09-25" } });
+  assert.deepEqual(evaluateRules([rule], [grdn, lil], ctx(770)).map((h) => h.ticker), ["GRDN"]); // LILAK < 2:1 → no alert
+  assert.deepEqual(evaluateRules([rule], [grdn, lil], ctx(650)), []); // SPY below its 200-day → no alerts
+});

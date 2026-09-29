@@ -281,7 +281,9 @@ export async function runAlerts() {
     watchlists.get(i.watchlist_id)!.add(i.ticker);
   }
   const screenMap = new Map<number, Filters>((screens ?? []).map((s) => [s.id, cleanFilters(s.filters)]));
-  const hits = evaluateRules(rules as AlertRule[], rows, { watchlists, screens: screenMap });
+  const { data: bench } = await db().from("ss_indicators").select("close, sma200, as_of").eq("ticker", REGIME_TICKER).maybeSingle();
+  const regime = bench ? { ticker: REGIME_TICKER, ...bench } : null;
+  const hits = evaluateRules(rules as AlertRule[], rows, { watchlists, screens: screenMap, regime });
   const day = rows[0].as_of;
 
   const { data: inserted, error } = await db()
