@@ -82,3 +82,85 @@ test("buyout headlines: target identified, acquirer spared, ambiguous → review
   );
   assert.deepEqual(buyoutHits({ ...base, title: "Acme beats earnings estimates", tickers: ["ACME"] }, names), []);
 });
+
+import { clampWeights, entryCap, planPortfolio, positionShares, stopDistance, round2, type Candidate } from "./sizing.ts";
+
+test("sizing worked example (spec 13)", () => {
+  const sig = [0.32, 0.28, 0.45, 0.38, 0.25, 0.52, 0.30, 0.41, 0.35, 0.29, 0.60, 0.33, 0.27];
+  const cfg = { ...MOM_DEFAULTS, B: 20_000, E: 120_000 };
+  const { I, N } = capitalAndSlots(cfg);
+  const w = clampWeights(sig, cfg);
+  assert.ok(Math.abs(w[0] - 0.0823) <= 0.0001, `w0 = ${w[0]}`);
+  const T0 = (w[0] * I * sig.length) / N;
+  assert.equal(round2(T0), 1613.89);
+  assert.equal(entryCap(85.0, cfg), 87.55);
+  const D = stopDistance(3.1, 85.46, cfg);
+  assert.equal(round2(D), 9.3);
+  assert.equal(round2(85.46 - D), 76.16); // Stop0
+  assert.equal(round2(85.46 - D - cfg.disaster_stop_extra * D), 71.51); // disaster stop
+  const s = positionShares(round2(T0), 85.46, round2(D), cfg);
+  assert.deepEqual([s.byTarget, s.byRisk, s.shares, s.tooSmall], [18, 64, 18, false]);
+});
+
+test("weight clamp converges to the band and sums to 1", () => {
+  const w = clampWeights([0.05, 0.9, 0.9, 0.9, 0.9], MOM_DEFAULTS);
+  assert.ok(Math.abs(w.reduce((a, b) => a + b, 0) - 1) < 1e-9);
+  assert.ok(Math.abs(w[0] - 1.5 / 5) < 1e-9, `capped at 1.5/n, got ${w[0]}`);
+  for (const x of w) assert.ok(x >= 0.5 / 5 - 1e-9 && x <= 1.5 / 5 + 1e-9);
+  assert.deepEqual(clampWeights([0.4], MOM_DEFAULTS), [1]);
+});
+
+const cand = (ticker: string, comp_rank: number, o: Partial<Candidate> = {}): Candidate => ({
+  ticker, comp_rank, close: 50, sigma63: 0.3, atr20: 1.5, sic2: "28", entry_ok: true, ...o,
+});
+
+test("plan: sector name cap skips the 5th name; unknown SIC is one bucket; alternates follow", () => {
+  const cfg = { ...MOM_DEFAULTS, B: 20_000 };
+  // Lower-ranked, higher-volatility SIC 28 names carry small weights, so the name cap (not the
+  // dollar cap) is what stops the fifth one.
+  const c = [
+    ...Array.from({ length: 6 }, (_, i) => cand(`X${i}`, 1 + i, { sic2: String(40 + i) })),
+    cand("F", 7, { sic2: null }), cand("G", 8, { sic2: null }),
+    cand("A", 9, { sigma63: 0.9 }), cand("B", 10, { sigma63: 0.9 }), cand("C", 11, { sigma63: 0.9 }),
+    cand("D", 12, { sigma63: 0.9 }), cand("E", 13, { sigma63: 0.9 }),
+    ...Array.from({ length: 8 }, (_, i) => cand(`Z${i}`, 14 + i, { sic2: String(60 + i) })),
+    cand("W", 30), // another SIC 28 name: not offered as an alternate once the sector is full
+  ];
+  const p = planPortfolio({ cfg, candidates: c, riskOn: true });
+  assert.equal(p.N, 13);
+  assert.equal(p.buys.length, 13);
+  assert.deepEqual(p.buys.filter((b) => b.sector === "28").map((b) => b.ticker), ["A", "B", "C", "D"]);
+  assert.match(p.skipped.find((s) => s.ticker === "E")!.reason, /more than 4 names/);
+  assert.deepEqual(p.buys.filter((b) => b.sector === "unknown").map((b) => b.ticker), ["F", "G"]);
+  assert.equal(p.alternates.length, 5);
+  assert.ok(p.alternates.every((a) => a.sic2 !== "28"));
+  // Targets never scale up past I and every position fits the risk cap.
+  assert.ok(p.buys.reduce((s, b) => s + b.amount, 0) <= p.I + 1e-6);
+  for (const b of p.buys) assert.ok(b.shares * b.D <= cfg.max_risk_pct_of_E * cfg.E + 1e-6);
+});
+
+test("plan: sector dollar cap, rule 6.7 skip, earnings watch, risk-off", () => {
+  const cfg = { ...MOM_DEFAULTS, B: 20_000 };
+  // 30% of I = $5,880. Low-σ names get big weights; three of them in one sector would breach.
+  const low = (t: string, r: number) => cand(t, r, { sigma63: 0.1, sic2: "60" });
+  const others = Array.from({ length: 12 }, (_, i) => cand(`Y${i}`, 10 + i, { sigma63: 0.6, sic2: String(70 + i) }));
+  const p = planPortfolio({ cfg, candidates: [low("L1", 1), low("L2", 2), low("L3", 3), ...others], riskOn: true });
+  const inSector = p.buys.filter((b) => b.sector === "60");
+  assert.ok(inSector.reduce((s, b) => s + b.amount, 0) <= 0.3 * p.I + 1e-6);
+  assert.ok(p.skipped.some((s) => /over 30% of I/.test(s.reason)));
+
+  // A $2,000 stock can't be bought at all with a ~$1,500 target in whole shares → skipped.
+  const pricey = planPortfolio({ cfg, candidates: [cand("BRK", 1, { close: 2000, atr20: 30, sic2: "63" }), ...others], riskOn: true });
+  assert.match(pricey.skipped.find((s) => s.ticker === "BRK")!.reason, /too small/);
+  assert.ok(!planPortfolio({ cfg: { ...cfg, fractional_shares: true }, candidates: [cand("BRK", 1, { close: 2000, atr20: 30 })], riskOn: true })
+    .skipped.some((s) => s.ticker === "BRK"));
+
+  const e = planPortfolio({ cfg, candidates: [cand("ERN", 1), ...others], riskOn: true, earnings: new Set(["ERN"]) });
+  assert.deepEqual(e.earningsWatch.map((c) => c.ticker), ["ERN"]);
+  assert.ok(!e.buys.some((b) => b.ticker === "ERN"));
+
+  const off = planPortfolio({ cfg, candidates: others, riskOn: false });
+  assert.equal(off.buys.length, 0);
+  assert.match(off.message!, /risk-off/);
+  assert.match(planPortfolio({ cfg: { ...cfg, B: 7_000 }, candidates: others, riskOn: true }).message!, /ETF/);
+});

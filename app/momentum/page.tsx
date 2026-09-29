@@ -2,7 +2,9 @@ import Link from "next/link";
 import { db } from "@/lib/db";
 import { big, money, num, pct } from "@/lib/format";
 import { capitalAndSlots, MOM_FIELDS } from "@/lib/momentum/config";
-import { getMomConfig } from "@/lib/momentum/jobs";
+import { getMomConfig, loadCalendar } from "@/lib/momentum/jobs";
+import { addTradingDays } from "@/lib/momentum/calendar";
+import { planPortfolio, type Candidate, type Plan } from "@/lib/momentum/sizing";
 import type { Regime } from "@/lib/momentum/regime";
 import { clearFlag, saveMomConfig, uploadEarnings } from "./actions";
 
@@ -37,6 +39,7 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
     db().from("ss_splits").select("ticker", { count: "exact", head: true }).eq("needs_repair", true).is("repaired_at", null),
   ]);
   const rows = (snap.data ?? []) as Snap[];
+  const plan = run ? await buildPlan(run.signal_date, cfg, (run.regime as Regime | null)?.riskOn ?? null) : null;
   const allFlags = (flags.data ?? []) as Flag[];
   const blocking = allFlags.filter((f) => f.excludes);
   const review = allFlags.filter((f) => !f.excludes);
@@ -132,6 +135,8 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
         </table>
       </div>
 
+      {plan && <PlanSection plan={plan} kind={run?.kind} signalDate={run?.signal_date} chase={cfg.chase_cap_pct} />}
+
       <h2>Data flags ({blocking.length} blocking, {review.length} to review)</h2>
       <p className="muted">
         Blocking flags keep a stock out of signals until you clear them. Big moves are often real news (earnings, trial results):
@@ -200,5 +205,75 @@ function FlagTable({ flags }: { flags: Flag[] }) {
         </tbody>
       </table>
     </div>
+  );
+}
+
+async function buildPlan(t: string, cfg: Awaited<ReturnType<typeof getMomConfig>>, riskOn: boolean | null): Promise<Plan> {
+  const [{ data: cands }, cal] = await Promise.all([
+    db().from("ss_mom_snapshots").select("ticker, comp_rank, close, sigma63, atr20, sic2, entry_ok")
+      .eq("signal_date", t).eq("entry_ok", true).order("comp_rank").limit(1000),
+    loadCalendar(),
+  ]);
+  // Earnings blackout: reports in the next N trading days after the signal date.
+  const until = addTradingDays(cal, t, cfg.earnings_blackout_days);
+  const { data: rep } = await db().from("ss_earnings_calendar").select("ticker").gt("report_date", t).lte("report_date", until);
+  // Holdings and wash-sale blocks come from the journal (build step 8); none are recorded yet.
+  return planPortfolio({ cfg, candidates: (cands ?? []) as Candidate[], riskOn, earnings: new Set((rep ?? []).map((r) => r.ticker)) });
+}
+
+function PlanSection({ plan, kind, signalDate, chase }: { plan: Plan; kind?: string; signalDate?: string; chase: number }) {
+  const total = plan.buys.reduce((a, b) => a + b.amount, 0);
+  return (
+    <>
+      <h2>Planned buys</h2>
+      <p className="muted">
+        {kind === "monthly" || kind === "weekly"
+          ? `Buy list from the ${kind} signals of ${signalDate}.`
+          : `Preview only: ${signalDate} isn't a rebalance date, so this shows what a rebalance on its close would buy.`}
+        {" "}Sized at the chase cap (S × {num(1 + chase, 2)}), the most a ticket may pay; the 9:45 ticket recomputes shares at the real limit.
+        {" "}{plan.buys.length} of {plan.openSlots} open slots · {money(total, 0)} of {money(plan.I, 0)} investable.
+      </p>
+      {plan.message && <div className="notice">{plan.message}</div>}
+      {plan.buys.length > 0 && (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Ticker</th><th>Rank</th><th>Sector</th><th>σ63</th><th>Weight</th><th>Target T</th><th>Signal S</th><th>Cap</th><th>Stop dist. D</th><th>Target sh.</th><th>Risk-cap sh.</th><th>Shares</th><th>Amount</th></tr>
+            </thead>
+            <tbody>
+              {plan.buys.map((b) => (
+                <tr key={b.ticker}>
+                  <td><Link href={`/t/${b.ticker}`}><b>{b.ticker}</b></Link></td>
+                  <td>{b.comp_rank}</td>
+                  <td>{b.sector}</td>
+                  <td>{pct(b.sigma63, 0, 100)}</td>
+                  <td>{pct(b.w, 2, 100)}</td>
+                  <td>{money(b.T)}</td>
+                  <td>{num(b.S)}</td>
+                  <td>{num(b.cap)}</td>
+                  <td>{num(b.D)}</td>
+                  <td>{b.byTarget}</td>
+                  <td>{b.byRisk}</td>
+                  <td className="score">{b.shares}</td>
+                  <td>{money(b.amount)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {plan.alternates.length > 0 && (
+        <p><b>Alternates:</b> {plan.alternates.map((a) => `${a.ticker} (#${a.comp_rank})`).join(", ")}</p>
+      )}
+      {plan.earningsWatch.length > 0 && (
+        <p><b>Earnings watch (skipped this time):</b> {plan.earningsWatch.map((a) => a.ticker).join(", ")}</p>
+      )}
+      {plan.skipped.length > 0 && (
+        <details className="panel">
+          <summary>Skipped ({plan.skipped.length})</summary>
+          <ul>{plan.skipped.map((k) => <li key={k.ticker}>{k.ticker} (#{k.comp_rank}): {k.reason}</li>)}</ul>
+        </details>
+      )}
+    </>
   );
 }
