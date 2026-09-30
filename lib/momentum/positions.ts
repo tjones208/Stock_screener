@@ -4,6 +4,7 @@ import { db, fetchAll } from "../db";
 import type { MomConfig } from "./config";
 import { addTradingDays, tradingDaysBetween, type Calendar } from "./calendar";
 import { entryCap, planPortfolio, type Candidate, type Held } from "./sizing";
+import { callsToClose } from "./calls";
 import { disasterStop, exitResult, reviewPosition, topUpShares, trailStop, type Lot, type Position } from "./stops";
 
 export type LotRow = Lot & {
@@ -55,6 +56,7 @@ export async function exitReview(t: string, monthEnd: boolean, riskOn: boolean |
     db().from("ss_data_flags").select("ticker, d").eq("kind", "buyout_news").eq("cleared", false).in("ticker", tickers),
     db().from("ss_mom_tickets").select("ticker").eq("side", "sell").eq("status", "open"),
   ]);
+  const { data: calls } = await db().from("ss_mom_calls").select("ticker, contract, contracts").in("status", ["open", "assign_pending"]).in("ticker", tickers);
   const close = new Map((bars ?? []).map((b) => [b.ticker, b.c as number]));
   const info = new Map((tk ?? []).map((x) => [x.ticker, x]));
   const s = new Map((snap ?? []).map((x) => [x.ticker, x]));
@@ -87,7 +89,7 @@ export async function exitReview(t: string, monthEnd: boolean, riskOn: boolean |
       const { error } = await db().from("ss_mom_tickets").upsert({
         signal_date: t, kind: "exit", side: "sell", ticker: tick, status: "open", exit_trigger: order.trigger, lots: order.lots,
         shares_to_sell: order.shares, urgent: order.urgent, deadline, trade_date: tradeDay, s_close: p.close ?? 0, cap: 0,
-        note: order.reason, updated_at: new Date().toISOString(),
+        note: callNote(tick, order.shares, lots, calls ?? []) + order.reason, updated_at: new Date().toISOString(),
       }, { onConflict: "signal_date,kind,side,ticker" });
       if (error) throw new Error(`exit ticket: ${error.message}`);
       exits++;
@@ -108,6 +110,15 @@ export async function exitReview(t: string, monthEnd: boolean, riskOn: boolean |
   await db().from("ss_mom_tickets").update({ trade_date: tradeDay, bid: null, ask: null, xp1: null, xp2: null, updated_at: new Date().toISOString() })
     .eq("side", "sell").eq("status", "open").lt("trade_date", tradeDay);
   return { positions: tickers.length, exits, topups };
+}
+
+/** "Buy back …" prefix for a sell ticket when open covered calls would be left uncovered. */
+function callNote(ticker: string, sell: number, lots: { ticker: string; shares: number }[], calls: { ticker: string; contract: string; contracts: number }[]) {
+  const mine = calls.filter((c) => c.ticker === ticker);
+  if (!mine.length) return "";
+  const held = lots.filter((l) => l.ticker === ticker).reduce((a, l) => a + l.shares, 0);
+  const n = callsToClose(held, sell, mine.reduce((a, c) => a + c.contracts, 0));
+  return n ? `FIRST buy to close ${n} covered call contract(s) (${mine.map((c) => c.contract).join(", ")}), then sell the shares. ` : "";
 }
 
 /** record-exit: close (or split) each lot on the ticket with X, trigger, P&L, R, days held and ST/LT. */

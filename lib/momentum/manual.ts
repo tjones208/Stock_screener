@@ -7,12 +7,22 @@ import { getMomConfig } from "./jobs";
 import { fillLevels } from "./orders";
 import { planPortfolio, positionShares, sectorOf, stopDistance, type Held } from "./sizing";
 import { manualWarnings } from "./manual-rules";
+import { recordFill } from "./tickets";
 
 export type ManualPreview = {
   ticker: string; name: string | null; holding: boolean; close: number | null; atr: number | null; D: number | null;
   target: number | null; valueBefore: number; suggestedShares: number | null; warnings: string[]; error?: string;
   price: number | null; shares: number | null;
+  /** Today's open buy order for this stock: saving records its fill instead of a hand-added lot. */
+  ticket: { id: number; lp1: number | null; cap: number; shares: number | null; atr: number | null } | null;
 };
+
+async function openBuyTicket(ticker: string) {
+  const { data } = await db().from("ss_mom_tickets").select("id, lp1, cap, shares_lp1, planned_shares, atr20")
+    .eq("side", "buy").eq("status", "open").eq("ticker", ticker).order("trade_date").limit(1);
+  const t = data?.[0];
+  return t ? { id: t.id as number, lp1: t.lp1 as number | null, cap: t.cap as number, shares: (t.shares_lp1 ?? t.planned_shares) as number | null, atr: t.atr20 as number | null } : null;
+}
 
 async function context(ticker: string) {
   const cfg = await getMomConfig();
@@ -49,14 +59,21 @@ async function context(ticker: string) {
 /** Everything the add form shows before you confirm: suggested shares and the rule warnings. */
 export async function previewManual(tickerIn: string, priceIn?: number, sharesIn?: number): Promise<ManualPreview> {
   const ticker = tickerIn.trim().toUpperCase();
-  const c = await context(ticker);
-  const base = { ticker, name: c.tk?.name ?? null, holding: c.held.has(ticker), valueBefore: c.held.get(ticker)?.value ?? 0 };
+  const [c, ticket] = await Promise.all([context(ticker), openBuyTicket(ticker)]);
+  const base = { ticker, name: c.tk?.name ?? null, holding: c.held.has(ticker), valueBefore: c.held.get(ticker)?.value ?? 0, ticket };
   if (!c.tk) return { ...base, close: null, atr: null, D: null, target: null, suggestedShares: null, warnings: [], price: null, shares: null, error: `${ticker} isn't a known ticker.` };
+  // A buy order carries its signal-day ATR, so it can be filled even without fresh metrics.
+  if (ticket && (!c.m || c.m.atr == null) && ticket.atr != null) {
+    const price = priceIn && priceIn > 0 ? priceIn : ticket.lp1 ?? ticket.cap;
+    const D = stopDistance(ticket.atr, price, c.cfg);
+    return { ...base, close: c.m?.close ?? null, atr: ticket.atr, D, target: null, suggestedShares: ticket.shares, warnings: [], price,
+      shares: sharesIn && sharesIn > 0 ? sharesIn : ticket.shares };
+  }
   if (!c.m || c.m.atr == null) {
     return { ...base, close: c.m?.close ?? null, atr: null, D: null, target: null, suggestedShares: null, warnings: [], price: null, shares: null,
       error: `${ticker} doesn't have enough price history in the app to set a stop.` };
   }
-  const price = priceIn && priceIn > 0 ? priceIn : c.m.close;
+  const price = priceIn && priceIn > 0 ? priceIn : ticket?.lp1 ?? c.m.close;
   const D = stopDistance(c.m.atr, price, c.cfg);
   const sector = sectorOf(c.snap?.sic2 ?? c.tk.sic_code?.slice(0, 2));
   // Target T with this stock in the portfolio (same sizing as the strategy's own buys).
@@ -67,9 +84,10 @@ export async function previewManual(tickerIn: string, priceIn?: number, sharesIn
   const suggested = target == null ? null : base.holding
     ? Math.max(0, Math.floor((target - base.valueBefore) / price))
     : positionShares(target, price, D, c.cfg).shares;
-  const shares = sharesIn && sharesIn > 0 ? sharesIn : suggested && suggested > 0 ? suggested : null;
+  const shares = sharesIn && sharesIn > 0 ? sharesIn : ticket?.shares ?? (suggested && suggested > 0 ? suggested : null);
   const sameSector = [...c.held.values()].filter((h) => sectorOf(h.sic2) === sector);
-  const warnings = shares == null ? [] : manualWarnings({
+  // A strategy buy order already passed every rule when it was created.
+  const warnings = shares == null || ticket ? [] : manualWarnings({
     holding: base.holding, inUniverse: !!c.snap, entryOk: !!c.snap?.entry_ok, riskOn: (c.run?.regime as { riskOn?: boolean } | null)?.riskOn ?? null,
     rebalanceDay: c.run?.kind === "monthly", heldCount: c.held.size, N: c.N, I: c.I, sector,
     sectorNamesAfter: sameSector.length + (base.holding ? 0 : 1),
@@ -82,6 +100,12 @@ export async function previewManual(tickerIn: string, priceIn?: number, sharesIn
 /** Create the lot (stops from the latest ATR20); warnings become its rule-break note. Returns the lot id. */
 export async function addManualLot(ticker: string, F: number, shares: number, filledAt: string): Promise<number> {
   const p = await previewManual(ticker, F, shares);
+  if (p.ticket) {
+    // It's today's buy order: record the order's fill (same as "Filled" under Buy today).
+    await recordFill(p.ticket.id, F, shares, filledAt, await getMomConfig());
+    const { data } = await db().from("ss_mom_lots").select("id").eq("ticket_id", p.ticket.id).order("id", { ascending: false }).limit(1);
+    return data?.[0]?.id as number;
+  }
   if (p.error || p.atr == null) throw new Error(p.error ?? "Can't set a stop for this stock.");
   const c = await context(p.ticker);
   const day = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" }).format(new Date(filledAt));

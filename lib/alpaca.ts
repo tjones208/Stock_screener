@@ -35,18 +35,21 @@ type Snapshot = {
 
 type Contract = { symbol: string; open_interest?: string | null };
 
+type Side = "put" | "call";
+
 /** Open interest by contract symbol (from the trading API; snapshots don't carry OI). */
-async function openInterest(ticker: string, expGte: string, expLte: string, strikeLte: number) {
+async function openInterest(ticker: string, side: Side, expGte: string, expLte: string, strike: { lte?: number; gte?: number }) {
   const oi = new Map<string, number>();
   let token: string | undefined;
   do {
     const url = new URL("https://paper-api.alpaca.markets/v2/options/contracts");
     url.searchParams.set("underlying_symbols", ticker);
-    url.searchParams.set("type", "put");
+    url.searchParams.set("type", side);
     url.searchParams.set("status", "active");
     url.searchParams.set("expiration_date_gte", expGte);
     url.searchParams.set("expiration_date_lte", expLte);
-    url.searchParams.set("strike_price_lte", String(strikeLte));
+    if (strike.lte != null) url.searchParams.set("strike_price_lte", String(strike.lte));
+    if (strike.gte != null) url.searchParams.set("strike_price_gte", String(strike.gte));
     url.searchParams.set("limit", "10000");
     if (token) url.searchParams.set("page_token", token);
     const r = await get<{ option_contracts?: Contract[]; next_page_token?: string | null }>(url);
@@ -59,22 +62,26 @@ async function openInterest(ticker: string, expGte: string, expLte: string, stri
 }
 
 /** Puts on `ticker` expiring in the window, with quotes, greeks, IV and OI. */
-export async function putChain(
-  ticker: string,
-  underlying: number,
-  expGte: string,
-  expLte: string,
-  strikeLte: number,
-): Promise<RawPut[]> {
+export function putChain(ticker: string, underlying: number, expGte: string, expLte: string, strikeLte: number): Promise<RawPut[]> {
+  return chain(ticker, "put", underlying, expGte, expLte, { lte: strikeLte });
+}
+
+/** Calls on `ticker` expiring in the window with strikes at or above `strikeGte` (covered-call candidates). */
+export function callChain(ticker: string, underlying: number, expGte: string, expLte: string, strikeGte: number): Promise<RawPut[]> {
+  return chain(ticker, "call", underlying, expGte, expLte, { gte: strikeGte });
+}
+
+async function chain(ticker: string, side: Side, underlying: number, expGte: string, expLte: string, strike: { lte?: number; gte?: number }): Promise<RawPut[]> {
   const snaps: Record<string, Snapshot> = {};
   let token: string | undefined;
   do {
     const url = new URL(`https://data.alpaca.markets/v1beta1/options/snapshots/${encodeURIComponent(ticker)}`);
     url.searchParams.set("feed", "indicative");
-    url.searchParams.set("type", "put");
+    url.searchParams.set("type", side);
     url.searchParams.set("expiration_date_gte", expGte);
     url.searchParams.set("expiration_date_lte", expLte);
-    url.searchParams.set("strike_price_lte", String(strikeLte));
+    if (strike.lte != null) url.searchParams.set("strike_price_lte", String(strike.lte));
+    if (strike.gte != null) url.searchParams.set("strike_price_gte", String(strike.gte));
     url.searchParams.set("limit", "1000");
     if (token) url.searchParams.set("page_token", token);
     const r = await get<{ snapshots?: Record<string, Snapshot>; next_page_token?: string | null }>(url);
@@ -83,12 +90,12 @@ export async function putChain(
   } while (token);
 
   if (!Object.keys(snaps).length) return [];
-  const oi = await openInterest(ticker, expGte, expLte, strikeLte);
+  const oi = await openInterest(ticker, side, expGte, expLte, strike);
 
   const out: RawPut[] = [];
   for (const [symbol, s] of Object.entries(snaps)) {
     const occ = parseOcc(symbol);
-    if (!occ || occ.side !== "put") continue;
+    if (!occ || occ.side !== side) continue;
     out.push({
       contract: symbol,
       ticker,

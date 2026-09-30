@@ -16,7 +16,8 @@ export async function momentumMorningPush() {
       .eq("side", "sell").eq("status", "open").lte("trade_date", today).order("urgent", { ascending: false }).order("ticker"),
     db().from("ss_mom_lots").select("id", { count: "exact", head: true }).is("exit_date", null),
   ]);
-  const msg = formatSellPush(today, (sells ?? []) as SellLine[], lots ?? 0);
+  const { data: assigned } = await db().from("ss_mom_calls").select("ticker, contracts, strike").eq("status", "assign_pending");
+  const msg = formatSellPush(today, (sells ?? []) as SellLine[], lots ?? 0, assigned ?? []);
   const sent = await pushAll(msg.title, msg.body, "/momentum");
   return { ...msg, sent };
 }

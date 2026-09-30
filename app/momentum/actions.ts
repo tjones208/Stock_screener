@@ -8,6 +8,7 @@ import { buyLimits, exitLimits, sharesAt } from "@/lib/momentum/orders";
 import { recordExit } from "@/lib/momentum/positions";
 import { promoteAlternate, recordFill } from "@/lib/momentum/tickets";
 import { addManualLot } from "@/lib/momentum/manual";
+import { closeCall, closeCallsForExit, confirmAssignment, recordCallSold } from "@/lib/momentum/covered";
 
 export async function saveMomConfig(form: FormData) {
   const current = await getMomConfig();
@@ -129,7 +130,14 @@ export async function exitTicket(form: FormData) {
   const fees = Number(form.get("fees") || 0);
   const at = String(form.get("exited_at") || "");
   if (!(id > 0) || !(price > 0) || !(fees >= 0)) throw new Error("Enter the average exit price (and fees, if any).");
-  await recordExit(id, price, fees, at ? nyLocalToIso(at) : new Date().toISOString(), await loadCalendar());
+  const when = at ? nyLocalToIso(at) : new Date().toISOString();
+  const callPrice = form.get("call_price");
+  if (callPrice !== null && String(callPrice) !== "") {
+    const { data: t } = await db().from("ss_mom_tickets").select("ticker, shares_to_sell").eq("id", id).single();
+    const { data: lots } = await db().from("ss_mom_lots").select("shares").eq("ticker", t?.ticker ?? "").is("exit_date", null);
+    if (t) await closeCallsForExit(t.ticker, t.shares_to_sell, (lots ?? []).reduce((a, l) => a + l.shares, 0), Number(callPrice), when);
+  }
+  await recordExit(id, price, fees, when, await loadCalendar());
   revalidatePath("/momentum");
 }
 
@@ -158,4 +166,35 @@ export async function undoLot(form: FormData) {
   await db().from("ss_mom_lots").delete().eq("id", Number(form.get("id"))).is("ticket_id", null).is("exit_date", null);
   revalidatePath("/momentum");
   redirect("/momentum#hold");
+}
+
+/** "I sold this call": record a covered call written against a position's round lots. */
+export async function sellCall(form: FormData) {
+  const ticker = String(form.get("ticker") ?? "").toUpperCase();
+  const contract = String(form.get("contract") ?? "").trim().toUpperCase();
+  const m = /^([A-Z0-9.]{1,6})(\d{2})(\d{2})(\d{2})C(\d{8})$/.exec(contract);
+  const contracts = Number(form.get("contracts"));
+  const premium = Number(form.get("premium"));
+  const at = String(form.get("opened_at") || "");
+  if (!m || !(contracts >= 1) || !(premium > 0)) throw new Error("Enter the call contract (OCC symbol), contracts and the premium per share you received.");
+  await recordCallSold(ticker, contract, `20${m[2]}-${m[3]}-${m[4]}`, Number(m[5]) / 1000, Math.floor(contracts), premium, at ? nyLocalToIso(at) : new Date().toISOString());
+  revalidatePath("/momentum");
+}
+
+export async function buyBackCall(form: FormData) {
+  const price = Number(form.get("price"));
+  if (!(price >= 0)) throw new Error("Enter the buy-back price per share.");
+  await closeCall(Number(form.get("id")), "bought_back", price, new Date().toISOString());
+  revalidatePath("/momentum");
+}
+
+export async function expireCall(form: FormData) {
+  await closeCall(Number(form.get("id")), "expired", 0, new Date().toISOString());
+  revalidatePath("/momentum");
+}
+
+export async function assignCall(form: FormData) {
+  const cfg = await getMomConfig();
+  await confirmAssignment(Number(form.get("id")), await loadCalendar(), cfg.fractional_shares);
+  revalidatePath("/momentum");
 }

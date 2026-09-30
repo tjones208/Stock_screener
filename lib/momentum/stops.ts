@@ -34,7 +34,7 @@ export type ExitOrder = {
 
 export const TRIGGER_LABEL: Record<number, string> = {
   1: "Regime risk-off", 2: "Stop hit", 3: "Dropped off (failed hold test)", 4: "Acquisition agreement", 5: "Halt / delisting",
-  6: "Buying power cut", 7: "Trim (over 2× target)",
+  6: "Buying power cut", 7: "Trim (over 2× target)", 8: "Called away (covered call)",
 };
 
 /** Lot order for partial sales: losing lots first, then highest cost (HIFO). */

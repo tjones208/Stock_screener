@@ -8,6 +8,7 @@ import { capitalAndSlots, normalizeMomConfig, type MomConfig } from "./config";
 import { isMonthEnd, isWeekEnd, nextTradingDay, type Calendar } from "./calendar";
 import { advanceTickets, createTickets } from "./tickets";
 import { exitReview, updateStops } from "./positions";
+import { refreshCallIdeas, settleExpiredCalls } from "./covered";
 import { regimeAt, type Regime } from "./regime";
 import { buyoutHits } from "./news";
 
@@ -142,8 +143,11 @@ export async function momentumBuild(t?: string) {
   // Order: stops on today's close → exit review (sells first) → roll open buys → new buys for freed slots.
   const tradeDay = nextTradingDay(cal, latest);
   const stops = await updateStops(latest, cfg);
+  const calls = await settleExpiredCalls(latest);
   const exits = await exitReview(latest, kind === "monthly", regime.riskOn, cfg, tradeDay, cal);
   const advanced = await advanceTickets(latest, tradeDay, cfg, cal);
   const tickets = kind === "daily" ? null : await createTickets(latest, kind, cfg, regime.riskOn, tradeDay, cal);
-  return { signalDate: latest, kind, N, tradeDay, regime: { riskOn: regime.riskOn, close: regime.close, sma: regime.sma }, stops, exits, advanced, tickets, ...(data as object) };
+  // Covered-call suggestions for the session (after exits, so positions being sold are skipped).
+  const callIdeas = await refreshCallIdeas(tradeDay, cfg, cal).catch((e) => ({ error: String(e) }));
+  return { signalDate: latest, kind, N, tradeDay, regime: { riskOn: regime.riskOn, close: regime.close, sma: regime.sma }, stops, calls, exits, advanced, tickets, callIdeas, ...(data as object) };
 }

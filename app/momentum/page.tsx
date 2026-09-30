@@ -6,7 +6,7 @@ import { getMomConfig, loadCalendar } from "@/lib/momentum/jobs";
 import { addTradingDays } from "@/lib/momentum/calendar";
 import { planPortfolio, type Candidate, type Plan } from "@/lib/momentum/sizing";
 import type { Regime } from "@/lib/momentum/regime";
-import { addPosition, clearFlag, dropTicket, exitTicket, fillTicket, markDisasterPosted, quoteExits, quoteTickets, saveMomConfig, undoLot, uploadEarnings } from "./actions";
+import { addPosition, assignCall, buyBackCall, expireCall, sellCall, clearFlag, dropTicket, exitTicket, fillTicket, markDisasterPosted, quoteExits, quoteTickets, saveMomConfig, undoLot, uploadEarnings } from "./actions";
 import { previewManual, type ManualPreview } from "@/lib/momentum/manual";
 import { TRIGGER_LABEL } from "@/lib/momentum/stops";
 import type { Ticket } from "@/lib/momentum/tickets";
@@ -54,6 +54,12 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
     : { data: [] };
   const lastClose = new Map((lastBars ?? []).map((b) => [b.ticker, b.close as number]));
   const { data: sellRows } = await db().from("ss_mom_tickets").select("*").eq("side", "sell").eq("status", "open").order("urgent", { ascending: false }).order("ticker");
+  const [{ data: callRows }, { data: ideaRows }] = await Promise.all([
+    db().from("ss_mom_calls").select("*").in("status", ["open", "assign_pending"]).order("expiration"),
+    db().from("ss_mom_call_ideas").select("*").order("ticker"),
+  ]);
+  const calls = (callRows ?? []) as CallView[];
+  const ideas = (ideaRows ?? []) as IdeaView[];
   const preview = sp.add ? await previewManual(sp.add, Number(sp.price) || undefined, Number(sp.shares) || undefined) : null;
   const added = sp.added ? lots.find((l) => l.id === Number(sp.added)) ?? null : null;
   const plan = run ? await buildPlan(run.signal_date, cfg, (run.regime as Regime | null)?.riskOn ?? null) : null;
@@ -93,6 +99,7 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
       <nav className="mnav">
         <a href="#sell"><span className="tag tag-sell">SELL</span> {sells.length}</a>
         <a href="#buy"><span className="tag tag-buy">BUY</span> {buys.length}</a>
+        <a href="#calls"><span className="tag tag-call">CALL</span> {ideas.filter((i) => i.contract).length + calls.length}</a>
         <a href="#hold"><span className="tag tag-hold">HOLD</span> {lots.length}</a>
         <a href="#watch"><span className="tag tag-watch">WATCH</span> {watchCount}</a>
         <a href="#info"><span className="tag tag-info">INFO</span></a>
@@ -116,12 +123,18 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
 
       <Section id="sell" tag="sell" title="Sell today" count={sells.length} open={sells.length > 0}
         hint={sells.length ? "Exit orders to place at 9:45 ET, before any buys" : "Nothing to sell"}>
-        <ExitSection sells={sells} />
+        <ExitSection sells={sells} callTickers={new Set(calls.map((c) => c.ticker))} />
       </Section>
 
       <Section id="buy" tag="buy" title="Buy today" count={buys.length} open={buys.length > 0}
         hint={buys.length ? "Buy orders to place after the sells fill" : "No buy orders. They appear the morning after a week- or month-end signal"}>
         <TicketsSection open={buys} cfg={cfg} />
+      </Section>
+
+      <Section id="calls" tag="call" title="Covered calls" count={ideas.filter((i) => i.contract).length + calls.length}
+        open={ideas.some((i) => i.contract) || calls.some((c) => c.status === "assign_pending")}
+        hint="Sell-to-open suggestions for positions with 100+ shares, and the calls you've sold">
+        <CallsSection ideas={ideas} calls={calls} lastClose={lastClose} />
       </Section>
 
       <Section id="hold" tag="hold" title="Your positions" count={lots.length} open={lots.length > 0 || !!preview || !!added}
@@ -270,8 +283,8 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
   );
 }
 
-type Tag = "sell" | "buy" | "hold" | "watch" | "info";
-const TAG_TEXT: Record<Tag, string> = { sell: "SELL", buy: "BUY", hold: "HOLD", watch: "WATCH", info: "INFO" };
+type Tag = "sell" | "buy" | "call" | "hold" | "watch" | "info";
+const TAG_TEXT: Record<Tag, string> = { sell: "SELL", buy: "BUY", call: "CALL", hold: "HOLD", watch: "WATCH", info: "INFO" };
 
 function Section({ id, tag, title, count, hint, open, children }: {
   id?: string; tag: Tag; title: string; count?: number; hint?: string; open: boolean; children: React.ReactNode;
@@ -426,7 +439,7 @@ function TicketsSection({ open, cfg }: { open: Ticket[]; cfg: Awaited<ReturnType
                 <tbody>
                   {open.map((t) => (
                     <tr key={t.id}>
-                      <td><span className="tag tag-buy">BUY</span> <Link href={`/t/${t.ticker}`}><b>{t.ticker}</b></Link><input type="hidden" name="id" value={t.id} /></td>
+                      <td><span className="tag tag-buy">BUY</span> <Link href={`/t/${t.ticker}`}><b>{t.ticker}</b></Link><input type="hidden" name="id" value={t.id} /> <AddLink ticker={t.ticker} /></td>
                       <td>{t.comp_rank}</td>
                       <td>{t.retry_day}/{cfg.entry_max_retry_days}</td>
                       <td>{num(t.s_close)}</td>
@@ -487,7 +500,7 @@ type SellTicket = {
   signal_date: string; bid: number | null; ask: number | null; xp1: number | null; xp2: number | null; note: string | null;
 };
 
-function ExitSection({ sells }: { sells: SellTicket[] }) {
+function ExitSection({ sells, callTickers }: { sells: SellTicket[]; callTickers: Set<string> }) {
   if (!sells.length) return <p className="muted">Nothing to sell today. Every position stays above its stop.</p>;
   const chrome =
     `At 9:45 AM ET, open my brokerage account and look up the current bid and ask for: ${sells.map((t) => t.ticker).join(", ")}. ` +
@@ -531,6 +544,7 @@ function ExitSection({ sells }: { sells: SellTicket[] }) {
             <input type="hidden" name="id" value={t.id} />
             <label>Avg exit X<input name="price" inputMode="decimal" style={{ width: 90 }} /></label>
             <label>Fees $<input name="fees" inputMode="decimal" defaultValue="0" style={{ width: 70 }} /></label>
+            {callTickers.has(t.ticker) && <label>Call buy-back $/sh<input name="call_price" inputMode="decimal" style={{ width: 90 }} /></label>}
             <label>Time (NY)<input type="datetime-local" name="exited_at" /></label>
             <button type="submit" style={{ alignSelf: "flex-end" }}>Sold {t.shares_to_sell}</button>
           </form>
@@ -622,14 +636,14 @@ function AddedNotice({ lot }: { lot: LotView }) {
 function AddForm({ preview }: { preview: ManualPreview | null }) {
   return (
     <details className="panel" open={!!preview} style={{ marginBottom: 12 }}>
-      <summary><b>{preview?.holding ? `+ Add shares to ${preview.ticker}` : preview ? `+ Add ${preview.ticker} to positions` : "+ Add a stock you bought"}</b></summary>
+      <summary><b>{preview?.ticket ? `+ Add ${preview.ticker} (today's buy order)` : preview?.holding ? `+ Add shares to ${preview.ticker}` : preview ? `+ Add ${preview.ticker} to positions` : "+ Add a stock you bought"}</b></summary>
       <form method="get" action="/momentum#hold" className="row" style={{ marginTop: 8, alignItems: "flex-end" }}>
         <label>Ticker<input name="add" defaultValue={preview?.ticker ?? ""} style={{ width: 90, textTransform: "uppercase" }} required /></label>
         <label>Avg price<input name="price" inputMode="decimal" defaultValue={preview?.price != null ? preview.price.toFixed(2) : ""} style={{ width: 90 }} /></label>
         <label>Shares<input name="shares" inputMode="decimal" defaultValue={preview?.shares ?? ""} style={{ width: 80 }} /></label>
         <label>Time (NY)<input type="datetime-local" name="filled_at" /></label>
         <button type="submit" className="ghost">Check rules</button>
-        {preview && !preview.error && <button type="submit" formAction={addPosition} formMethod="post">{preview.holding ? "Add shares" : "Add to positions"}</button>}
+        {preview && !preview.error && <button type="submit" formAction={addPosition} formMethod="post">{preview.ticket ? "Record fill" : preview.holding ? "Add shares" : "Add to positions"}</button>}
       </form>
       {preview?.error && <div className="notice">{preview.error}</div>}
       {preview && !preview.error && (
@@ -639,7 +653,9 @@ function AddForm({ preview }: { preview: ManualPreview | null }) {
             {preview.target != null && <> · target {money(preview.target, 0)}{preview.holding ? `, you hold ${money(preview.valueBefore, 0)}` : ""}</>}
             {preview.suggestedShares != null && <> · suggested {preview.suggestedShares} sh</>}
           </p>
-          {preview.shares == null ? (
+          {preview.ticket ? (
+            <p className="up">This is today&apos;s buy order: saving records its fill and closes the order{preview.ticket.lp1 == null ? ` (limit cap ${num(preview.ticket.cap)})` : ` (LP1 ${num(preview.ticket.lp1)})`}.</p>
+          ) : preview.shares == null ? (
             <p className="muted">Enter the shares to check the rules.</p>
           ) : preview.warnings.length ? (
             <div className="notice">
@@ -652,5 +668,100 @@ function AddForm({ preview }: { preview: ManualPreview | null }) {
         </div>
       )}
     </details>
+  );
+}
+
+type CallView = { id: number; ticker: string; contract: string; expiration: string; strike: number; contracts: number; premium: number; status: string; note: string | null };
+type IdeaView = { ticker: string; contracts: number; contract: string | null; expiration: string | null; strike: number | null; dte: number | null;
+  bid: number | null; ask: number | null; mid: number | null; delta: number | null; open_interest: number | null; error: string | null; as_of: string };
+
+function CallsSection({ ideas, calls, lastClose }: { ideas: IdeaView[]; calls: CallView[]; lastClose: Map<string, number> }) {
+  const pending = calls.filter((c) => c.status === "assign_pending");
+  const open = calls.filter((c) => c.status === "open");
+  return (
+    <>
+      <p className="muted">
+        Only on positions that already hold 100+ shares. Suggestions are far out of the money (about 0.15–0.20 delta) and expire before the
+        next month-end rebalance and before earnings. If a call finishes in the money, the shares are called away and count as an exit at the strike.
+        Quotes come from Alpaca&apos;s delayed feed: confirm the premium at your broker.
+      </p>
+      {pending.map((c) => (
+        <div key={c.id} className="notice row spread">
+          <span><span className="tag tag-sell">CALLED AWAY?</span> <b>{c.ticker}</b> {c.contracts * 100} sh at {num(c.strike)} · {c.note}</span>
+          <span className="row">
+            <form action={assignCall}><input type="hidden" name="id" value={c.id} /><button type="submit">Confirm: shares were called away</button></form>
+            <form action={expireCall}><input type="hidden" name="id" value={c.id} /><button type="submit" className="ghost">No, it expired</button></form>
+          </span>
+        </div>
+      ))}
+
+      <h3><span className="tag tag-call">SELL TO OPEN</span> Suggested calls</h3>
+      {!ideas.length ? (
+        <p className="muted">No position has an uncovered round lot of 100 shares right now.</p>
+      ) : (
+        <div className="card-list">
+          {ideas.map((i) => (
+            <div key={i.ticker} className="panel">
+              <div className="row spread">
+                <span><span className="tag tag-call">CALL</span> <b>{i.ticker}</b> · {i.contracts} contract{i.contracts === 1 ? "" : "s"} available ({i.contracts * 100} sh) · last {num(lastClose.get(i.ticker))}</span>
+                {i.contract && <span className="muted">as of {i.as_of}</span>}
+              </div>
+              {i.contract ? (
+                <>
+                  <p style={{ margin: "6px 0" }}>
+                    Sell to open <b>{i.contracts} × {i.ticker} {i.expiration} {num(i.strike)} call</b> ({i.contract}) · {i.dte} days · Δ {num(i.delta)} ·
+                    bid {num(i.bid)} / ask {num(i.ask)} · limit ≈ <b>{num(i.mid)}</b> → about <b>{money((i.mid ?? 0) * 100 * i.contracts, 0)}</b> premium
+                    {i.strike != null && lastClose.get(i.ticker) != null && <> · {pct(i.strike / lastClose.get(i.ticker)! - 1, 1, 100)} above the price</>}
+                  </p>
+                  <form action={sellCall} className="row" style={{ alignItems: "flex-end" }}>
+                    <input type="hidden" name="ticker" value={i.ticker} />
+                    <label>Contract<input name="contract" defaultValue={i.contract} style={{ width: 190 }} /></label>
+                    <label>Contracts<input name="contracts" inputMode="numeric" defaultValue={i.contracts} style={{ width: 70 }} /></label>
+                    <label>Premium $/sh<input name="premium" inputMode="decimal" defaultValue={i.mid ?? ""} style={{ width: 90 }} /></label>
+                    <label>Time (NY)<input type="datetime-local" name="opened_at" /></label>
+                    <button type="submit">I sold this call</button>
+                  </form>
+                </>
+              ) : (
+                <p className="muted" style={{ margin: "6px 0" }}>{i.error}</p>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      <h3><span className="tag tag-hold">OPEN</span> Calls you&apos;ve sold</h3>
+      {!open.length ? <p className="muted">None open.</p> : (
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>Ticker</th><th>Contract</th><th>Contracts</th><th>Strike</th><th>Expires</th><th>Premium</th><th>Stock</th><th></th></tr></thead>
+            <tbody>
+              {open.map((c) => {
+                const px = lastClose.get(c.ticker);
+                const itm = px != null && px >= c.strike;
+                return (
+                  <tr key={c.id}>
+                    <td><span className="tag tag-call">CALL</span> <b>{c.ticker}</b></td>
+                    <td>{c.contract}</td>
+                    <td>{c.contracts}</td>
+                    <td>{num(c.strike)}</td>
+                    <td>{c.expiration}</td>
+                    <td>{money(c.premium * 100 * c.contracts, 0)}</td>
+                    <td className={itm ? "down" : ""}>{num(px)}{itm ? " · in the money" : ""}</td>
+                    <td>
+                      <form action={buyBackCall} className="row">
+                        <input type="hidden" name="id" value={c.id} />
+                        <input name="price" inputMode="decimal" placeholder="$/sh" aria-label={`${c.ticker} call buy-back price`} style={{ width: 70 }} />
+                        <button type="submit" className="ghost">Bought back</button>
+                      </form>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </>
   );
 }

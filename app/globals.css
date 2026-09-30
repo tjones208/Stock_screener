@@ -87,3 +87,4 @@ details.msec[open] > summary::before { transform: rotate(90deg); }
 .tag-hold { background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--accent); }
 .tag-watch { background: color-mix(in srgb, var(--warn) 22%, transparent); color: var(--warn); }
 .tag-info { background: var(--panel-2); color: var(--muted); }
+.tag-call { background: color-mix(in srgb, #b085f5 24%, transparent); color: #b085f5; }
