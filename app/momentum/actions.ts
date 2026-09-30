@@ -1,11 +1,13 @@
 "use server";
 import { revalidatePath } from "next/cache";
+import { redirect } from "next/navigation";
 import { db, upsertChunks } from "@/lib/db";
 import { MOM_DEFAULTS, normalizeMomConfig, type MomKey } from "@/lib/momentum/config";
 import { getMomConfig, loadCalendar, setMomConfig } from "@/lib/momentum/jobs";
 import { buyLimits, exitLimits, sharesAt } from "@/lib/momentum/orders";
 import { recordExit } from "@/lib/momentum/positions";
 import { promoteAlternate, recordFill } from "@/lib/momentum/tickets";
+import { addManualLot } from "@/lib/momentum/manual";
 
 export async function saveMomConfig(form: FormData) {
   const current = await getMomConfig();
@@ -137,4 +139,23 @@ export async function markDisasterPosted(form: FormData) {
   const { data } = await db().from("ss_mom_lots").select("id, disaster_stop").in("id", ids);
   for (const l of data ?? []) await db().from("ss_mom_lots").update({ disaster_posted: l.disaster_stop }).eq("id", l.id);
   revalidatePath("/momentum");
+}
+
+/** "Add to positions": a stock bought outside a ticket, or more shares of a holding. */
+export async function addPosition(form: FormData) {
+  const ticker = String(form.get("add") ?? "").trim().toUpperCase();
+  const price = Number(form.get("price"));
+  const shares = Number(form.get("shares"));
+  const at = String(form.get("filled_at") || "");
+  if (!ticker || !(price > 0) || !(shares > 0)) throw new Error("Enter the ticker, your average price and the shares.");
+  const id = await addManualLot(ticker, price, shares, at ? nyLocalToIso(at) : new Date().toISOString());
+  revalidatePath("/momentum");
+  redirect(`/momentum?added=${id}#hold`);
+}
+
+/** Undo a hand-added lot (only lots not created by a ticket and not yet sold). */
+export async function undoLot(form: FormData) {
+  await db().from("ss_mom_lots").delete().eq("id", Number(form.get("id"))).is("ticket_id", null).is("exit_date", null);
+  revalidatePath("/momentum");
+  redirect("/momentum#hold");
 }

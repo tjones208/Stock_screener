@@ -275,3 +275,22 @@ test("morning push text: sells with reasons, or a daily no-sell summary", () => 
   assert.match(m.body, /SELL VTRS 85 sh \(by 2026-10-05\): Dropped off \(failed hold test\)/);
   assert.deepEqual(formatSellPush("2026-10-06", [], 13), { title: "Momentum Tue, Oct 6: no sells", body: "Hold all 13 lots; stops are updated on the Momentum tab." });
 });
+
+import { manualWarnings, type ManualCheck } from "./manual-rules.ts";
+
+test("hand-added positions: warnings for each broken rule, none when it fits", () => {
+  const cfg = MOM_DEFAULTS;
+  const ok: ManualCheck = {
+    holding: false, inUniverse: true, entryOk: true, riskOn: true, rebalanceDay: false, heldCount: 5, N: 13, I: 19_600,
+    sector: "28", sectorNamesAfter: 2, sectorDollarsAfter: 3000, shares: 56, price: 21.12, D: 2.35, target: 1189, valueBefore: 0,
+  };
+  assert.deepEqual(manualWarnings(ok, cfg), []);
+  const bad = manualWarnings({ ...ok, inUniverse: false, heldCount: 13, sectorNamesAfter: 5, sectorDollarsAfter: 7000, shares: 300, riskOn: false }, cfg);
+  assert.equal(bad.length, 7);
+  assert.match(bad.join(" "), /risk-on.*universe.*open slot.*5 names.*over 30%.*Risk to the stop is \$705.*over its target/);
+  assert.match(manualWarnings({ ...ok, entryOk: false }, cfg)[0], /Fails the entry test/);
+  // Adding shares: allowed at month-end under half the target; otherwise it's a rule break.
+  const top = { ...ok, holding: true, valueBefore: 400, shares: 30, target: 1189 };
+  assert.deepEqual(manualWarnings({ ...top, rebalanceDay: true }, cfg), []);
+  assert.match(manualWarnings(top, cfg)[0], /Top-ups are only allowed at month-end/);
+});

@@ -6,7 +6,8 @@ import { getMomConfig, loadCalendar } from "@/lib/momentum/jobs";
 import { addTradingDays } from "@/lib/momentum/calendar";
 import { planPortfolio, type Candidate, type Plan } from "@/lib/momentum/sizing";
 import type { Regime } from "@/lib/momentum/regime";
-import { clearFlag, dropTicket, exitTicket, fillTicket, markDisasterPosted, quoteExits, quoteTickets, saveMomConfig, uploadEarnings } from "./actions";
+import { addPosition, clearFlag, dropTicket, exitTicket, fillTicket, markDisasterPosted, quoteExits, quoteTickets, saveMomConfig, undoLot, uploadEarnings } from "./actions";
+import { previewManual, type ManualPreview } from "@/lib/momentum/manual";
 import { TRIGGER_LABEL } from "@/lib/momentum/stops";
 import type { Ticket } from "@/lib/momentum/tickets";
 
@@ -24,7 +25,7 @@ const FLAG_LABEL: Record<string, string> = {
   split_unrepaired: "Split not repaired", buyout_news: "Buyout news", buyout_review: "Buyout? (review)",
 };
 
-export default async function Momentum({ searchParams }: { searchParams: Promise<{ all?: string }> }) {
+export default async function Momentum({ searchParams }: { searchParams: Promise<{ all?: string; add?: string; price?: string; shares?: string; added?: string }> }) {
   const sp = await searchParams;
   const cfg = await getMomConfig();
   const { I, N } = capitalAndSlots(cfg);
@@ -53,6 +54,8 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
     : { data: [] };
   const lastClose = new Map((lastBars ?? []).map((b) => [b.ticker, b.close as number]));
   const { data: sellRows } = await db().from("ss_mom_tickets").select("*").eq("side", "sell").eq("status", "open").order("urgent", { ascending: false }).order("ticker");
+  const preview = sp.add ? await previewManual(sp.add, Number(sp.price) || undefined, Number(sp.shares) || undefined) : null;
+  const added = sp.added ? lots.find((l) => l.id === Number(sp.added)) ?? null : null;
   const plan = run ? await buildPlan(run.signal_date, cfg, (run.regime as Regime | null)?.riskOn ?? null) : null;
   const allFlags = (flags.data ?? []) as Flag[];
   const blocking = allFlags.filter((f) => f.excludes);
@@ -121,8 +124,10 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
         <TicketsSection open={buys} cfg={cfg} />
       </Section>
 
-      <Section id="hold" tag="hold" title="Your positions" count={lots.length} open={lots.length > 0}
+      <Section id="hold" tag="hold" title="Your positions" count={lots.length} open={lots.length > 0 || !!preview || !!added}
         hint={lots.length ? "What you own, with today's stop and disaster stop" : "No positions yet"}>
+        {added && <AddedNotice lot={added} />}
+        <AddForm preview={preview} />
         <PositionsSection lots={lots} lastClose={lastClose} weekly={rebalance} />
       </Section>
 
@@ -130,7 +135,7 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
       <Section tag="watch" title="Alternates" count={altList.length} open={false}
         hint="Backups: not orders. One becomes a buy only if a buy ticket is dropped">
         {altList.length ? (
-          <ol>{altList.map((a) => <li key={a.ticker}><Link href={`/t/${a.ticker}`}><b>{a.ticker}</b></Link> <span className="muted">rank #{a.comp_rank}</span></li>)}</ol>
+          <ol>{altList.map((a) => <li key={a.ticker}><Link href={`/t/${a.ticker}`}><b>{a.ticker}</b></Link> <span className="muted">rank #{a.comp_rank}</span> <AddLink ticker={a.ticker} /></li>)}</ol>
         ) : <p className="muted">No alternates.</p>}
       </Section>
       <Section tag="watch" title="Earnings watch" count={plan?.earningsWatch.length ?? 0} open={false}
@@ -142,7 +147,7 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
       {plan && !rebalance && (
         <Section tag="watch" title="Next rebalance preview" count={plan.buys.length} open={false}
           hint={`Not orders: what a rebalance on ${run?.signal_date}'s close would buy`}>
-          <PlanSection plan={plan} kind={run?.kind} signalDate={run?.signal_date} chase={cfg.chase_cap_pct} />
+          <PlanSection plan={plan} kind={run?.kind} signalDate={run?.signal_date} chase={cfg.chase_cap_pct} risk={cfg.max_risk_pct_of_E} equity={cfg.E} />
         </Section>
       )}
 
@@ -158,7 +163,7 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
             <thead>
               <tr>
                 <th>Rank</th><th>Ticker</th><th>Status</th><th>Close</th><th>MOM</th><th>H52</th><th>Days since high</th><th>MOM pct</th><th>H52 pct</th>
-                <th>Composite</th><th>σ63</th><th>ATR20</th><th>Mkt cap</th><th>SIC</th><th>Entry</th><th>Hold</th>
+                <th>Composite</th><th>σ63</th><th>ATR20</th><th>Mkt cap</th><th>SIC</th><th>Entry</th><th>Hold</th><th></th>
               </tr>
             </thead>
             <tbody>
@@ -180,6 +185,7 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
                   <td>{r.sic2 ?? "—"}</td>
                   <td>{r.entry_ok ? <span className="up">✓</span> : <span className="muted">—</span>}</td>
                   <td>{r.hold_ok ? <span className="up">✓</span> : <span className="muted">—</span>}</td>
+                  <td><AddLink ticker={r.ticker} held={status.get(r.ticker) === "held"} /></td>
                 </tr>
               ))}
             </tbody>
@@ -189,7 +195,7 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
 
       {plan && rebalance && (
         <Section tag="info" title="Buy list sizing" count={plan.buys.length} open={false} hint={`How today's buy orders were sized from the ${run?.kind} signal`}>
-          <PlanSection plan={plan} kind={run?.kind} signalDate={run?.signal_date} chase={cfg.chase_cap_pct} />
+          <PlanSection plan={plan} kind={run?.kind} signalDate={run?.signal_date} chase={cfg.chase_cap_pct} risk={cfg.max_risk_pct_of_E} equity={cfg.E} />
         </Section>
       )}
 
@@ -335,7 +341,7 @@ async function buildPlan(t: string, cfg: Awaited<ReturnType<typeof getMomConfig>
   return planPortfolio({ cfg, candidates: (cands ?? []) as Candidate[], riskOn, earnings: new Set((rep ?? []).map((r) => r.ticker)) });
 }
 
-function PlanSection({ plan, kind, signalDate, chase }: { plan: Plan; kind?: string; signalDate?: string; chase: number }) {
+function PlanSection({ plan, kind, signalDate, chase, risk, equity }: { plan: Plan; kind?: string; signalDate?: string; chase: number; risk: number; equity: number }) {
   const total = plan.buys.reduce((a, b) => a + b.amount, 0);
   return (
     <>
@@ -347,11 +353,16 @@ function PlanSection({ plan, kind, signalDate, chase }: { plan: Plan; kind?: str
         {" "}{plan.buys.length} of {plan.openSlots} open slots · {money(total, 0)} of {money(plan.I, 0)} investable.
       </p>
       {plan.message && <div className="notice">{plan.message}</div>}
+      <p className="muted">
+        <b>Shares by target</b> = the position&apos;s dollar target T ÷ the cap price (how many shares its share of the portfolio buys).{" "}
+        <b>Shares by risk limit</b> = your risk budget per position ({pct(risk, 1, 100)} of equity = {money(risk * equity, 0)}) ÷ the stop distance D (the most shares
+        you can hold so a stop-out loses no more than that). You buy the <b>smaller</b> of the two.
+      </p>
       {plan.buys.length > 0 && (
         <div className="table-wrap">
           <table>
             <thead>
-              <tr><th>Ticker</th><th>Rank</th><th>Sector</th><th>σ63</th><th>Weight</th><th>Target T</th><th>Signal S</th><th>Cap</th><th>Stop dist. D</th><th>Target sh.</th><th>Risk-cap sh.</th><th>Shares</th><th>Amount</th></tr>
+              <tr><th>Ticker</th><th>Rank</th><th>Sector</th><th>σ63</th><th>Weight</th><th>Target T</th><th>Signal S</th><th>Cap</th><th>Stop dist. D</th><th title="Target T ÷ cap price: how many shares the dollar target buys">Shares by target</th><th title="Risk budget (0.5% of equity E) ÷ stop distance D: the most shares you can hold so a stop-out loses no more than the budget">Shares by risk limit</th><th title="The smaller of the two">Shares</th><th>Amount</th></tr>
             </thead>
             <tbody>
               {plan.buys.map((b) => (
@@ -469,6 +480,7 @@ function TicketsSection({ open, cfg }: { open: Ticket[]; cfg: Awaited<ReturnType
 type LotView = {
   id: number; ticker: string; shares: number; fill_price: number; filled_at: string; d: number; stop0: number; stop: number;
   highest_close: number | null; disaster_stop: number; disaster_posted: number | null; lt_date: string; earnings_date: string | null;
+  ticket_id: number | null; rule_broken: boolean; rule_note: string | null;
 };
 type SellTicket = {
   id: number; ticker: string; exit_trigger: number; shares_to_sell: number; urgent: boolean; deadline: string | null; trade_date: string;
@@ -533,7 +545,7 @@ function ExitSection({ sells }: { sells: SellTicket[] }) {
 }
 
 function PositionsSection({ lots, lastClose, weekly }: { lots: LotView[]; lastClose: Map<string, number>; weekly: boolean }) {
-  if (!lots.length) return <p className="muted">No positions yet. Recorded buy fills show up here with their stops.</p>;
+  if (!lots.length) return <p className="muted">No positions yet. Recorded buy fills and stocks you add above show up here with their stops.</p>;
   const stale = lots.filter((l) => l.disaster_posted == null || Math.abs(l.disaster_posted - l.disaster_stop) > 0.004);
   return (
     <>
@@ -545,7 +557,7 @@ function PositionsSection({ lots, lastClose, weekly }: { lots: LotView[]; lastCl
       <div className="table-wrap">
         <table>
           <thead>
-            <tr><th>Ticker</th><th>Entry</th><th>Shares</th><th>F</th><th>D</th><th>Stop0</th><th>High close</th><th>Stop</th><th>Disaster</th><th>At broker</th><th>Close</th><th>P&amp;L</th><th>R</th><th>Earnings</th><th>LT date</th></tr>
+            <tr><th>Ticker</th><th>Entry</th><th>Shares</th><th>F</th><th>D</th><th>Stop0</th><th>High close</th><th>Stop</th><th>Disaster</th><th>At broker</th><th>Close</th><th>P&amp;L</th><th>R</th><th>Earnings</th><th>LT date</th><th></th></tr>
           </thead>
           <tbody>
             {lots.map((l) => {
@@ -553,7 +565,10 @@ function PositionsSection({ lots, lastClose, weekly }: { lots: LotView[]; lastCl
               const pnl = c != null ? (c - l.fill_price) * l.shares : null;
               return (
                 <tr key={l.id}>
-                  <td><span className="tag tag-hold">HOLD</span> <Link href={`/t/${l.ticker}`}><b>{l.ticker}</b></Link></td>
+                  <td>
+                    <span className="tag tag-hold">HOLD</span> <Link href={`/t/${l.ticker}`}><b>{l.ticker}</b></Link>
+                    {l.rule_broken && <span className="tag tag-watch" title={l.rule_note ?? ""} style={{ marginLeft: 4 }}>RULE BREAK</span>}
+                  </td>
                   <td>{l.filled_at.slice(0, 10)}</td>
                   <td>{l.shares}</td>
                   <td>{num(l.fill_price)}</td>
@@ -568,6 +583,7 @@ function PositionsSection({ lots, lastClose, weekly }: { lots: LotView[]; lastCl
                   <td>{c != null ? num((c - l.fill_price) / l.d) : "—"}</td>
                   <td>{l.earnings_date ?? "—"}</td>
                   <td>{l.lt_date}</td>
+                  <td><Link href={`/momentum?add=${l.ticker}#hold`} className="btn ghost">+ Add shares</Link></td>
                 </tr>
               );
             })}
@@ -581,5 +597,60 @@ function PositionsSection({ lots, lastClose, weekly }: { lots: LotView[]; lastCl
         </form>
       )}
     </>
+  );
+}
+
+function AddLink({ ticker, held }: { ticker: string; held?: boolean }) {
+  return <Link href={`/momentum?add=${ticker}#hold`} className="btn ghost" style={{ padding: "4px 10px" }}>{held ? "+ Add shares" : "+ Add"}</Link>;
+}
+
+function AddedNotice({ lot }: { lot: LotView }) {
+  return (
+    <div className="notice row spread">
+      <span>
+        Added <b>{lot.ticker}</b>: {lot.shares} sh at {num(lot.fill_price)} · stop {num(lot.stop)} · disaster {num(lot.disaster_stop)}.
+        {lot.rule_broken ? <> <span className="tag tag-watch">RULE BREAK</span> {lot.rule_note}</> : " Fits the strategy's rules."}
+      </span>
+      {lot.ticket_id == null && (
+        <form action={undoLot}><input type="hidden" name="id" value={lot.id} /><button type="submit" className="danger">Undo</button></form>
+      )}
+    </div>
+  );
+}
+
+/** One form for both: record a stock you bought, or add shares to a holding. "Check" re-runs the rules; "Add" saves. */
+function AddForm({ preview }: { preview: ManualPreview | null }) {
+  return (
+    <details className="panel" open={!!preview} style={{ marginBottom: 12 }}>
+      <summary><b>{preview?.holding ? `+ Add shares to ${preview.ticker}` : preview ? `+ Add ${preview.ticker} to positions` : "+ Add a stock you bought"}</b></summary>
+      <form method="get" action="/momentum#hold" className="row" style={{ marginTop: 8, alignItems: "flex-end" }}>
+        <label>Ticker<input name="add" defaultValue={preview?.ticker ?? ""} style={{ width: 90, textTransform: "uppercase" }} required /></label>
+        <label>Avg price<input name="price" inputMode="decimal" defaultValue={preview?.price != null ? preview.price.toFixed(2) : ""} style={{ width: 90 }} /></label>
+        <label>Shares<input name="shares" inputMode="decimal" defaultValue={preview?.shares ?? ""} style={{ width: 80 }} /></label>
+        <label>Time (NY)<input type="datetime-local" name="filled_at" /></label>
+        <button type="submit" className="ghost">Check rules</button>
+        {preview && !preview.error && <button type="submit" formAction={addPosition} formMethod="post">{preview.holding ? "Add shares" : "Add to positions"}</button>}
+      </form>
+      {preview?.error && <div className="notice">{preview.error}</div>}
+      {preview && !preview.error && (
+        <div style={{ marginTop: 8 }}>
+          <p className="muted">
+            {preview.name ?? preview.ticker} · last close {num(preview.close)} · stop distance D {num(preview.D)} → stop {preview.price != null && preview.D != null ? num(preview.price - preview.D) : "—"}
+            {preview.target != null && <> · target {money(preview.target, 0)}{preview.holding ? `, you hold ${money(preview.valueBefore, 0)}` : ""}</>}
+            {preview.suggestedShares != null && <> · suggested {preview.suggestedShares} sh</>}
+          </p>
+          {preview.shares == null ? (
+            <p className="muted">Enter the shares to check the rules.</p>
+          ) : preview.warnings.length ? (
+            <div className="notice">
+              <b><span className="tag tag-watch">RULE BREAK</span> You can still add it; it will be tracked and marked as a rule break:</b>
+              <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>{preview.warnings.map((w) => <li key={w}>{w}</li>)}</ul>
+            </div>
+          ) : (
+            <p className="up">Fits the strategy&apos;s rules.</p>
+          )}
+        </div>
+      )}
+    </details>
   );
 }
