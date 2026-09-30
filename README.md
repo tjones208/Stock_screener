@@ -20,7 +20,7 @@ Next.js on Vercel Hobby + Supabase (`meal-plan-sync` project, tables prefixed `s
 | Fundamentals | Massive ticker details + financials | 2 tickers/min on a rolling schedule. Order: watchlist, then S&P 500, then the rest. Refreshed every 30 days. |
 | S&P 500 list + GICS sectors | [datasets/s-and-p-500-companies](https://github.com/datasets/s-and-p-500-companies) | Other tickers get a sector mapped from their SIC code. |
 
-Earnings dates and dividend yield aren't available on the free tiers. Those columns stay empty, and "No earnings in next 30 days" passes when the date is unknown.
+Earnings dates come from **Finnhub** (free key): every trading morning the momentum job pulls the next ~13 weeks for the whole market into `ss_earnings_calendar`. They drive the screener's earnings filters, the momentum earnings blackout, covered-call expiration windows and each position's next earnings date. A broker CSV can still be uploaded on the Momentum tab as a backup. Dividend yield isn't available on the free tiers.
 
 ## Schedule (UTC, run by Supabase pg_cron → the app's `/api/cron/*` routes)
 
@@ -43,6 +43,7 @@ The cron token lives in the `ss_app_secrets` table, where both pg_cron and the a
    - `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`
    - `MASSIVE_API_KEY`
    - `APP_PASSWORD`
+   - `FINNHUB_API_KEY` (free, finnhub.io: earnings calendar)
 
    Nothing else is needed. The session key is derived from the service-role key, and the cron token and push keys live in `ss_app_secrets`.
 3. **Migration 0003** creates the secrets table and the schedules above.

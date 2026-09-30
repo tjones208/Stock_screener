@@ -30,7 +30,7 @@ export async function clearFlag(form: FormData) {
 
 /**
  * Earnings CSV from the broker: a header row naming a ticker/symbol column and a date column
- * (report date / earnings date / date). Dates as YYYY-MM-DD or M/D/YYYY. Replaces the whole calendar.
+ * (report date / earnings date / date). Dates as YYYY-MM-DD or M/D/YYYY. Replaces earlier CSV uploads.
  */
 export async function uploadEarnings(form: FormData) {
   const file = form.get("file");
@@ -54,8 +54,9 @@ export async function uploadEarnings(form: FormData) {
     const report_date = iso(c[di] ?? "");
     if (ticker && report_date) rows.set(`${ticker}|${report_date}`, { ticker, report_date });
   }
-  await db().from("ss_earnings_calendar").delete().gte("report_date", "1900-01-01");
-  await upsertChunks("ss_earnings_calendar", [...rows.values()], "ticker,report_date");
+  // Replaces earlier CSV uploads only; the nightly Finnhub dates stay.
+  await db().from("ss_earnings_calendar").delete().eq("source", "csv");
+  await upsertChunks("ss_earnings_calendar", [...rows.values()].map((r) => ({ ...r, source: "csv" })), "ticker,report_date");
   revalidatePath("/momentum");
 }
 

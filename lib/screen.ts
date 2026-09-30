@@ -45,6 +45,8 @@ export type ScreenerRow = {
   free_cash_flow_ttm: number | null;
   dividend_yield: number | null;
   next_earnings_date: string | null;
+  /** Last date the earnings calendar is complete through (null = no calendar synced). */
+  earnings_covered_until: string | null;
   vwap: number | null;
   range_pos: number | null;
   change_5d: number | null;
@@ -199,6 +201,8 @@ export function tradingDaysBetween(fromIso: string, toIso: string): number {
  * signal date. Unknown dates return false — the free data plans carry no earnings calendar,
  * so callers should flag "unknown" rather than treat it as clear (see earningsStatus).
  */
+const daysUntilFrom = (from: string, to: string) => Math.round((Date.parse(to) - Date.parse(from)) / 86_400_000);
+
 export function earningsWithin(r: ScreenerRow, n: number): boolean {
   if (!r.next_earnings_date) return false;
   const days = tradingDaysBetween(r.as_of, r.next_earnings_date);
@@ -206,7 +210,8 @@ export function earningsWithin(r: ScreenerRow, n: number): boolean {
 }
 
 export function earningsStatus(r: ScreenerRow): "unknown" | "clear" | "soon" {
-  if (!r.next_earnings_date) return "unknown";
+  // No date: "clear" when the synced calendar covers the next few weeks, otherwise genuinely unknown.
+  if (!r.next_earnings_date) return r.earnings_covered_until && r.as_of && daysUntilFrom(r.as_of, r.earnings_covered_until) >= 14 ? "clear" : "unknown";
   return earningsWithin(r, 5) ? "soon" : "clear";
 }
 

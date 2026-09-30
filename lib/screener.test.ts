@@ -19,7 +19,7 @@ const row = (o: Partial<ScreenerRow>): ScreenerRow => ({
   ema9: 10.8, ema21: 10.6, rsi14: 58, atr14: 0.3, hv30: 0.28, high_52w: 12, low_52w: 8.5, pct_from_high: -8.3, pct_from_low: 29,
   pe: 7, ps: 0.2, pb: 1, eps_ttm: 1.5, revenue_ttm: 1.8e11, revenue_growth_yoy: 4, gross_margin: 8, operating_margin: 3,
   net_margin: 2.5, roe: 10, debt_to_equity: 5, current_ratio: 1.1, free_cash_flow_ttm: null, dividend_yield: null,
-  next_earnings_date: null,
+  next_earnings_date: null, earnings_covered_until: null,
   vwap: 10.9, range_pos: 60, change_5d: 1, change_20d: 3, nr7: false, inside_day: false,
   day_open: 10.8, day_high: 11.2, day_low: 10.7, sma10: 11.3, prev_open: 11.1, prev_close: 10.9,
   ema20: 10.9, ema20_5d: 10.8, swing_low5: 10.6, swing_high20: 12.2, resistance60: 11.5, rsi_min5: 45, ...o,
@@ -323,4 +323,23 @@ test("dbConditions pushes only plain column filters", () => {
     { op: "eq", col: "sector", value: "Energy" },
     { op: "eq", col: "in_sp500", value: true },
   ]);
+});
+
+test("earnings calendar: Finnhub rows parsed; missing date is 'clear' once the calendar covers it", async () => {
+  const { parseFinnhub, dateWindows } = await import("./earnings.ts");
+  const rows = parseFinnhub([
+    { symbol: "aapl", date: "2026-10-29", hour: "amc", epsEstimate: 1.6 },
+    { symbol: "AAPL", date: "2026-10-29", hour: "amc", epsEstimate: 1.6 }, // duplicate
+    { symbol: "", date: "2026-10-29" },
+    { symbol: "MSFT", date: "bad" },
+    { symbol: "JPM", date: "2026-10-14", hour: "bmo", epsEstimate: null },
+  ]);
+  assert.deepEqual(rows, [
+    { ticker: "AAPL", report_date: "2026-10-29", hour: "after close", eps_estimate: 1.6, source: "finnhub" },
+    { ticker: "JPM", report_date: "2026-10-14", hour: "before open", eps_estimate: null, source: "finnhub" },
+  ]);
+  assert.deepEqual(dateWindows("2026-10-01", "2026-10-16", 7), [["2026-10-01", "2026-10-07"], ["2026-10-08", "2026-10-14"], ["2026-10-15", "2026-10-16"]]);
+  assert.equal(earningsStatus(row({ next_earnings_date: null, earnings_covered_until: null })), "unknown");
+  assert.equal(earningsStatus(row({ next_earnings_date: null, earnings_covered_until: "2026-12-29" })), "clear");
+  assert.equal(earningsStatus(row({ next_earnings_date: "2026-09-30" })), "soon");
 });

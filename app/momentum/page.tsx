@@ -62,6 +62,12 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
   const ideas = (ideaRows ?? []) as IdeaView[];
   const preview = sp.add ? await previewManual(sp.add, Number(sp.price) || undefined, Number(sp.shares) || undefined) : null;
   const added = sp.added ? lots.find((l) => l.id === Number(sp.added)) ?? null : null;
+  // Upcoming reports for what you hold or are about to buy.
+  const watchTickers = [...new Set([...lots.map((l) => l.ticker), ...(openTix ?? []).map((b) => b.ticker as string), ...(sellRows ?? []).map((x) => x.ticker as string)])];
+  const { data: upcoming } = watchTickers.length
+    ? await db().from("ss_earnings_calendar").select("ticker, report_date, hour, eps_estimate, source")
+        .in("ticker", watchTickers).gte("report_date", new Date().toISOString().slice(0, 10)).order("report_date").limit(100)
+    : { data: [] };
   const plan = run ? await buildPlan(run.signal_date, cfg, (run.regime as Regime | null)?.riskOn ?? null) : null;
   const allFlags = (flags.data ?? []) as Flag[];
   const blocking = allFlags.filter((f) => f.excludes);
@@ -69,7 +75,13 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
   const regime = run?.regime as Regime | null | undefined;
   const funnel = (run?.funnel ?? []) as { step: string; count: number }[];
   const warnings = [...((run?.warnings ?? []) as string[])];
-  if (!earnings.count) warnings.push("No earnings calendar uploaded: the earnings blackout rule will be skipped.");
+  const { data: syncRow } = await db().from("ss_settings").select("value").eq("key", "earnings_sync").maybeSingle();
+  const earningsSync = syncRow?.value as { from: string; to: string; rows: number; synced_at: string } | undefined;
+  if (!earnings.count) {
+    warnings.push(process.env.FINNHUB_API_KEY
+      ? "The earnings calendar hasn't synced yet (it runs with the 6:15am ET job); until then the earnings blackout rule is skipped."
+      : "No earnings calendar: add FINNHUB_API_KEY in Vercel (free key from finnhub.io) or upload a CSV. Until then the earnings blackout rule is skipped.");
+  }
   if (splits.count) warnings.push(`${splits.count} splits are waiting for their bars to be re-fetched; those tickers are excluded until then.`);
 
   const sells = (sellRows ?? []) as SellTicket[];
@@ -155,7 +167,7 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
         hint="Would qualify, but report earnings too soon: skipped this time, not orders">
         {plan?.earningsWatch.length
           ? <p>{plan.earningsWatch.map((a) => a.ticker).join(", ")}</p>
-          : <p className="muted">{earnings.count ? "None." : "No earnings calendar uploaded yet (see Info → Earnings calendar)."}</p>}
+          : <p className="muted">{earnings.count ? "None." : "No earnings calendar yet (see Info → Earnings calendar)."}</p>}
       </Section>
       {plan && !rebalance && (
         <Section tag="watch" title="Next rebalance preview" count={plan.buys.length} open={false}
@@ -250,8 +262,33 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
           : <p className="muted">None yet.</p>}
       </Section>
 
-      <Section tag="info" title="Earnings calendar" count={earnings.count ?? 0} open={false} hint="Upload your broker's earnings CSV">
-        <p className="muted">Upload a CSV from your broker with a ticker (or symbol) column and a report date column. It replaces the current calendar.</p>
+      <Section tag="info" title="Earnings calendar" count={(upcoming ?? []).length} open={false}
+        hint={earningsSync ? `Finnhub, synced ${earningsSync.synced_at.slice(0, 10)} through ${earningsSync.to} · ${earnings.count ?? 0} dates` : `${earnings.count ?? 0} dates · Finnhub not synced yet`}>
+        <p className="muted">
+          Pulled from Finnhub every trading morning (the next ~13 weeks for the whole market) and used for the {cfg.earnings_blackout_days}-day
+          earnings blackout on buys, covered-call expirations, each position&apos;s next earnings date and the screener&apos;s earnings filters.
+          {!process.env.FINNHUB_API_KEY && <> <b>Add FINNHUB_API_KEY in Vercel</b> (free key from finnhub.io) to turn it on.</>}
+        </p>
+        <h3>Upcoming for your positions and orders</h3>
+        {(upcoming ?? []).length ? (
+          <div className="table-wrap" style={{ marginBottom: 12 }}>
+            <table>
+              <thead><tr><th>Ticker</th><th>Report date</th><th>When</th><th>EPS estimate</th><th>Source</th></tr></thead>
+              <tbody>
+                {(upcoming ?? []).map((e) => (
+                  <tr key={`${e.ticker}|${e.report_date}`}>
+                    <td><StatusTag s={status.get(e.ticker)} /> <b>{e.ticker}</b></td>
+                    <td>{e.report_date}</td>
+                    <td>{e.hour ?? "—"}</td>
+                    <td>{e.eps_estimate != null ? num(e.eps_estimate) : "—"}</td>
+                    <td className="muted">{e.source}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : <p className="muted">No upcoming reports for stocks you hold or are buying.</p>}
+        <p className="muted">Backup: upload a CSV from your broker with a ticker (or symbol) column and a report date column. It replaces earlier CSV uploads and is kept alongside the Finnhub dates.</p>
         <form action={uploadEarnings} className="row">
           <input type="file" name="file" accept=".csv,text/csv" />
           <button type="submit">Upload</button>
