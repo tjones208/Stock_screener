@@ -33,6 +33,7 @@ Earnings dates and dividend yield aren't available on the free tiers. Those colu
 | `ss-options` | Tue–Sat 10:25 (≈ 6:25am ET) | Scan put chains (top 150 liquid names under $50, plus watchlists), then evaluate alerts and send push before the open. |
 | `ss-fundamentals` | every minute | 2 tickers per run. Waits until the backfill is done. |
 | `ss-momentum` | Tue–Sat 10:15 | Sync splits and re-fetch bars for split tickers, then validation, universe, signals, ranking snapshot and regime for the latest trading day. |
+| `ss-momentum-notify` | Mon–Fri 11:45 (≈ 7:45am ET) | Push today's momentum sells and why (stop hit, dropped off / failed hold test, regime, buyout, halt, trim), or "no sells". Skips market holidays. |
 | `ss-backfill` | every 6 min | Loads about 20 missing days per run, up to 400 days back. Once history is complete it does nothing. |
 
 The cron token lives in the `ss_app_secrets` table, where both pg_cron and the app read it, so it never has to be copied anywhere. See the job log in `ss_job_runs` and the schedules with `select * from cron.job;`. The nightly writes also keep the free Supabase project from pausing.

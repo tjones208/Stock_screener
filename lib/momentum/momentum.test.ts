@@ -262,3 +262,16 @@ test("trim over 2× target back to 1.5×, losing lots first then highest cost; t
   assert.equal(topUpShares(pos({ lots: [lotAt(1, 50, 4)], entryOk: false }), cfg), 0);
   assert.equal(topUpShares(pos({ lots: [lotAt(1, 50, 6)] }), cfg), 0);
 });
+
+import { formatSellPush } from "./notify-format.ts";
+
+test("morning push text: sells with reasons, or a daily no-sell summary", () => {
+  const m = formatSellPush("2026-10-05", [
+    { ticker: "AMRX", shares_to_sell: 56, exit_trigger: 2, urgent: true, deadline: "2026-10-05", note: "Closed 22.60 at or below the stop 22.65." },
+    { ticker: "VTRS", shares_to_sell: 85, exit_trigger: 3, urgent: false, deadline: "2026-10-05", note: "Failed the month-end hold test." },
+  ], 13);
+  assert.equal(m.title, "Momentum Mon, Oct 5: 2 sells at 9:45");
+  assert.match(m.body, /^SELL AMRX 56 sh \(today\): Stop hit — Closed 22.60/);
+  assert.match(m.body, /SELL VTRS 85 sh \(by 2026-10-05\): Dropped off \(failed hold test\)/);
+  assert.deepEqual(formatSellPush("2026-10-06", [], 13), { title: "Momentum Tue, Oct 6: no sells", body: "Hold all 13 lots; stops are updated on the Momentum tab." });
+});
