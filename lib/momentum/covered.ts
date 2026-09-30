@@ -1,11 +1,11 @@
 import "server-only";
-// Covered calls on momentum positions: nightly suggestions, expiry settlement, and recording
-// sales, buy-backs and assignments (a called-away position is an exit at the strike).
+// Covered calls on momentum positions, sold in your broker and recorded here: nightly eligibility
+// (which positions have uncovered round lots and which expirations fit), expiry settlement, and
+// recording sales, buy-backs and assignments (a called-away position is an exit at the strike).
 import { db } from "../db";
-import { callChain } from "../alpaca";
 import type { MomConfig } from "./config";
 import type { Calendar } from "./calendar";
-import { callsToClose as callsToCloseCount, callWindow, coverableContracts, pickCall } from "./calls";
+import { callsToClose as callsToCloseCount, callWindow, coverableContracts } from "./calls";
 import { pickLots, type Lot } from "./stops";
 import { recordExit } from "./positions";
 
@@ -18,8 +18,6 @@ export async function openCalls(): Promise<CallRow[]> {
   const { data } = await db().from("ss_mom_calls").select("*").in("status", ["open", "assign_pending"]).order("expiration");
   return (data ?? []) as CallRow[];
 }
-
-const alpacaReady = () => !!process.env.ALPACA_KEY_ID && !!process.env.ALPACA_SECRET_KEY;
 
 /**
  * After an expiration date: a call that finished out of the money expired worthless; one that
@@ -42,18 +40,22 @@ export async function settleExpiredCalls(t: string) {
   return { expired, pending };
 }
 
-/** Nightly: the call to sell on each position with uncovered round lots (skips positions being sold). */
+/**
+ * Nightly: positions with uncovered round lots of 100 shares (skipping ones being sold), with the
+ * expiration range that fits: at least call_min_dte days out, by this month's last trading day and
+ * before the next earnings date.
+ */
 export async function refreshCallIdeas(today: string, cfg: MomConfig, cal: Calendar) {
   if (!cfg.covered_calls) {
     await db().from("ss_mom_call_ideas").delete().neq("ticker", "");
-    return { ideas: 0, skipped: "covered calls off" };
+    return { eligible: 0, skipped: "covered calls off" };
   }
   const [{ data: lots }, calls, { data: sells }] = await Promise.all([
     db().from("ss_mom_lots").select("ticker, shares, earnings_date").is("exit_date", null),
     openCalls(),
     db().from("ss_mom_tickets").select("ticker").eq("side", "sell").eq("status", "open"),
   ]);
-  const selling = new Set((sells ?? []).map((s) => s.ticker));
+  const selling = new Set((sells ?? []).map((x) => x.ticker));
   const pos = new Map<string, { shares: number; earnings: string | null }>();
   for (const l of lots ?? []) {
     const p = pos.get(l.ticker) ?? { shares: 0, earnings: null };
@@ -61,34 +63,21 @@ export async function refreshCallIdeas(today: string, cfg: MomConfig, cal: Calen
     if (l.earnings_date && (!p.earnings || l.earnings_date < p.earnings)) p.earnings = l.earnings_date;
     pos.set(l.ticker, p);
   }
-  // Positions no longer eligible lose their suggestion.
-  const { data: existing } = await db().from("ss_mom_call_ideas").select("ticker");
-  let ideas = 0;
+  const rows = [];
   for (const [ticker, p] of pos) {
     const open = calls.filter((c) => c.ticker === ticker).reduce((a, c) => a + c.contracts, 0);
     const n = coverableContracts(p.shares, open);
-    if (!n || selling.has(ticker)) { await db().from("ss_mom_call_ideas").delete().eq("ticker", ticker); continue; }
-    const base = { ticker, as_of: today, contracts: n, contract: null, expiration: null, strike: null, dte: null, bid: null, ask: null, mid: null, delta: null, iv: null, open_interest: null, updated_at: new Date().toISOString() };
+    if (!n || selling.has(ticker)) continue;
     const w = callWindow(cal, today, p.earnings, cfg);
-    if (!w) { await db().from("ss_mom_call_ideas").upsert({ ...base, error: "Too close to month-end or earnings to sell a call this month." }); continue; }
-    if (!alpacaReady()) { await db().from("ss_mom_call_ideas").upsert({ ...base, error: "Add your Alpaca paper keys in Vercel to get call suggestions." }); continue; }
-    const { data: ind } = await db().from("ss_indicators").select("close").eq("ticker", ticker).maybeSingle();
-    const px = ind?.close as number | undefined;
-    if (!px) continue;
-    try {
-      const chain = await callChain(ticker, px, w.gte, w.lte, px);
-      const pick = pickCall(chain, px, today, w, cfg);
-      await db().from("ss_mom_call_ideas").upsert(pick ? {
-        ...base, contract: pick.contract, expiration: pick.expiration, strike: pick.strike, dte: pick.dte, bid: pick.bid, ask: pick.ask,
-        mid: Math.round(pick.mid * 100) / 100, delta: pick.delta, iv: pick.iv, open_interest: pick.openInterest, error: null,
-      } : { ...base, error: `No call between ${cfg.call_delta_min}–${cfg.call_delta_max} delta with enough liquidity expiring by ${w.lte}.` });
-      ideas++;
-    } catch (e) {
-      await db().from("ss_mom_call_ideas").upsert({ ...base, error: `Option chain unavailable: ${String(e).slice(0, 160)}` });
-    }
+    rows.push({
+      ticker, as_of: today, contracts: n, exp_earliest: w?.gte ?? null, exp_latest: w?.lte ?? null, updated_at: new Date().toISOString(),
+      note: w ? (p.earnings && w.lte < w.monthEnd ? `Earnings ${p.earnings}: expire by ${w.lte}.` : null)
+        : "Too close to month-end or earnings to sell a call this month.",
+    });
   }
-  for (const e of existing ?? []) if (!pos.has(e.ticker)) await db().from("ss_mom_call_ideas").delete().eq("ticker", e.ticker);
-  return { ideas };
+  await db().from("ss_mom_call_ideas").delete().neq("ticker", "");
+  if (rows.length) await db().from("ss_mom_call_ideas").insert(rows);
+  return { eligible: rows.length };
 }
 
 export async function recordCallSold(ticker: string, contract: string, expiration: string, strike: number, contracts: number, premium: number, openedAt: string) {
@@ -96,7 +85,11 @@ export async function recordCallSold(ticker: string, contract: string, expiratio
   const shares = (lots ?? []).reduce((a, l) => a + l.shares, 0);
   const open = (await openCalls()).filter((c) => c.ticker === ticker).reduce((a, c) => a + c.contracts, 0);
   if (contracts > coverableContracts(shares, open)) throw new Error(`Only ${coverableContracts(shares, open)} contract(s) are covered by your ${ticker} shares.`);
-  const { error } = await db().from("ss_mom_calls").insert({ ticker, contract, expiration, strike, contracts, premium, opened_at: openedAt });
+  // Flag (but allow) a call that outlives the month-end rebalance or earnings: it could block a scheduled exit.
+  const { data: idea } = await db().from("ss_mom_call_ideas").select("exp_latest").eq("ticker", ticker).maybeSingle();
+  const note = idea?.exp_latest && expiration > idea.exp_latest
+    ? `Expires after ${idea.exp_latest} (month-end rebalance or earnings): it may have to be bought back before a scheduled sale.` : null;
+  const { error } = await db().from("ss_mom_calls").insert({ ticker, contract, expiration, strike, contracts, premium, opened_at: openedAt, note });
   if (error) throw new Error(`ss_mom_calls: ${error.message}`);
   await db().from("ss_mom_call_ideas").delete().eq("ticker", ticker);
 }

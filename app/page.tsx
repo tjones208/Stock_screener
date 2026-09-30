@@ -80,16 +80,9 @@ const COLUMNS: Record<string, Col> = {
   market_cap: { label: "Mkt cap", render: (r) => big(r.market_cap) },
   pe: { label: "P/E", render: (r) => num(r.pe, 1) },
   revenue_growth_yoy: { label: "Rev g", render: (r) => pct(r.revenue_growth_yoy, 0) },
-  put: { label: "Put", sort: "put_strike", render: (r) => (r.put_strike ? `${num(r.put_strike, r.put_strike % 1 ? 1 : 0)}P ${r.put_expiration?.slice(5)}` : "—") },
-  put_annual_yield: { label: "Yield/yr", render: (r) => pct(r.put_annual_yield, 0, 100) },
-  put_delta: { label: "Δ", render: (r) => (r.put_delta == null ? "—" : num(Math.abs(r.put_delta), 2)) },
-  put_iv: { label: "IV", render: (r) => pct(r.put_iv, 0, 100) },
-  put_oi: { label: "OI", render: (r) => big(r.put_oi) },
-  put_spread_pct: { label: "Spread", render: (r) => pct(r.put_spread_pct, 0, 100) },
-  wheel_score: { label: "Score", render: (r) => <span className="score">{num(r.wheel_score, 0)}</span> },
 };
 
-const DEFAULT_COLUMNS = ["close", "change_pct", "rsi14", "vol_ratio", "pct_from_high", "market_cap", "pe", "revenue_growth_yoy", "put", "put_annual_yield", "put_delta", "put_iv", "put_oi", "wheel_score"];
+const DEFAULT_COLUMNS = ["close", "change_pct", "rsi14", "vol_ratio", "dollar_vol", "atr_pct", "pct_from_high", "market_cap", "pe", "revenue_growth_yoy"];
 
 function qs(f: Filters, patch: Filters = {}) {
   const p = new URLSearchParams({ ...f, ...patch });
@@ -126,7 +119,7 @@ export default async function Screener({ searchParams }: { searchParams: Promise
   const activeScreen = screens?.find((s) => qs(cleanFilters(s.filters)) === qs(filters));
   const strategy = filters.strategy ? STRATEGY_BY_KEY.get(filters.strategy) : undefined;
   const cols = (strategy?.columns ?? DEFAULT_COLUMNS).filter((k) => COLUMNS[k]).map((k) => ({ key: k, ...COLUMNS[k] }));
-  const sortKey = filters.sort || "wheel_score";
+  const sortKey = filters.sort || "dollar_vol";
   const levels = new Map<string, Levels | null>(strategy ? results.map((r) => [r.ticker, levelsFor(strategy.key, r)]) : []);
   const side = strategy && (filters.side === "long" || filters.side === "short") ? filters.side : "";
   const bySide = side
@@ -144,12 +137,9 @@ export default async function Screener({ searchParams }: { searchParams: Promise
       return [r.ticker, l ? sizePosition(l, r, overnight, sizing, strategy?.sizing) : null];
     }),
   );
-  const isWheel = strategy?.key === "wheel";
   const nextOpen = strategy?.execution === "next_open";
   const stopLimit = strategy?.execution === "stop_limit";
-  const levelHeaders = isWheel
-    ? ["Trade", "Credit", "Breakeven", "Buy back", "Contracts", "Collateral", "Profit @ target"]
-    : stopLimit
+  const levelHeaders = stopLimit
       ? ["Side", "Buy-stop", "Limit", "Stop", "T1 (sell 50%)", "T2 trail", "R:R to T1", "R:R @ limit", "Risk/sh (@ limit)", "Shares", "Position (@ limit)", "$ Risk", "$ @ T1 (50%)", "Sized by"]
       : nextOpen
       ? ["Side", "Ref (close)", "Valid T+1 open", "Stop", "Target", "R:R", "R:R @ worst", "Time exit", "Risk/sh (worst)", "Shares", "Position (worst)", "$ Risk", "$ @ Target", "Sized by"]
@@ -192,7 +182,7 @@ export default async function Screener({ searchParams }: { searchParams: Promise
                 <b>Market regime:</b> {gate.reason}
               </div>
             )}
-            <SizingPanel s={sizing} overnight={overnight} wheel={isWheel} overrides={strategy.sizing} />
+            <SizingPanel s={sizing} overnight={overnight} overrides={strategy.sizing} />
           </div>
         )}
       </div>
@@ -327,7 +317,7 @@ export default async function Screener({ searchParams }: { searchParams: Promise
                   </div>
                   <div className="muted" style={{ fontSize: 11, maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis" }}>{r.name}</div>
                 </td>
-                {strategy && <LevelCells l={levels.get(r.ticker) ?? null} size={sizes.get(r.ticker) ?? null} wheel={isWheel} nextOpen={nextOpen} stopLimit={stopLimit} />}
+                {strategy && <LevelCells l={levels.get(r.ticker) ?? null} size={sizes.get(r.ticker) ?? null} nextOpen={nextOpen} stopLimit={stopLimit} />}
                 {cols.map((c) => <td key={c.key}>{c.render(r)}</td>)}
               </tr>
             ))}
@@ -340,26 +330,11 @@ export default async function Screener({ searchParams }: { searchParams: Promise
 
 const usd0 = (v: number) => `$${Math.round(v).toLocaleString("en-US")}`;
 
-function LevelCells({ l, size, wheel, nextOpen, stopLimit }: { l: Levels | null; size: Size | null; wheel: boolean; nextOpen: boolean; stopLimit: boolean }) {
-  const n = wheel ? 7 : nextOpen || stopLimit ? 14 : 11;
+function LevelCells({ l, size, nextOpen, stopLimit }: { l: Levels | null; size: Size | null; nextOpen: boolean; stopLimit: boolean }) {
+  const n = nextOpen || stopLimit ? 14 : 11;
   if (!l) return <>{Array.from({ length: n }, (_, i) => <td key={i} className="lvl muted">—</td>)}</>;
   const sizeCells = (count: number, cells: React.ReactNode[]) =>
     size ? cells : Array.from({ length: count }, (_, i) => <td key={`s${i}`} className="lvl muted">—</td>);
-  if (wheel) {
-    return (
-      <>
-        <td className="lvl" style={{ textAlign: "left" }}>{l.how}</td>
-        <td className="lvl">{money(l.entry)}</td>
-        <td className="lvl">{money(l.stop)}</td>
-        <td className="lvl up">{money(l.target)}</td>
-        {sizeCells(3, [
-          <td key="q" className="lvl"><b>{size?.qty}</b></td>,
-          <td key="p" className="lvl">{size && usd0(size.position)}</td>,
-          <td key="w" className="lvl up">{size && usd0(size.reward)}</td>,
-        ])}
-      </>
-    );
-  }
   if (stopLimit) {
     return (
       <>
@@ -425,16 +400,14 @@ function LevelCells({ l, size, wheel, nextOpen, stopLimit }: { l: Levels | null;
   );
 }
 
-function SizingPanel({ s: saved, overnight, wheel, overrides }: { s: SizingSettings; overnight: boolean; wheel: boolean; overrides?: SizingOverrides }) {
+function SizingPanel({ s: saved, overnight, overrides }: { s: SizingSettings; overnight: boolean; overrides?: SizingOverrides }) {
   const s = applyOverrides(saved, overrides);
   const bp = s.account * (overnight ? s.overnightLeverage : s.dayTradeLeverage);
   const caps = [
     s.maxPosition > 0 ? usd0(s.maxPosition) : null,
     s.maxPositionPct > 0 ? `${s.maxPositionPct}% of equity (${usd0((s.account * s.maxPositionPct) / 100)})` : null,
   ].filter(Boolean);
-  const summary = wheel
-    ? `${usd0(s.wheelAllocation)} of cash collateral per wheel position`
-    : `Risk ${s.riskPct}% of ${usd0(s.account)} = ${usd0((s.account * s.riskPct) / 100)} per trade · max ${caps.length ? caps.join(" / ") : "no limit"} per position · ${overnight ? "overnight" : "day-trade"} buying power ${usd0(bp)} · max ${s.maxAdvPct}% of avg volume`;
+  const summary = `Risk ${s.riskPct}% of ${usd0(s.account)} = ${usd0((s.account * s.riskPct) / 100)} per trade · max ${caps.length ? caps.join(" / ") : "no limit"} per position · ${overnight ? "overnight" : "day-trade"} buying power ${usd0(bp)} · max ${s.maxAdvPct}% of avg volume`;
   return (
     <details style={{ marginTop: 8 }}>
       <summary style={{ fontWeight: 400 }}><b>Position sizing:</b> <span className="muted">{summary}</span></summary>
@@ -446,7 +419,6 @@ function SizingPanel({ s: saved, overnight, wheel, overrides }: { s: SizingSetti
         <label>Day-trade buying power (× account)<input name="dayTradeLeverage" inputMode="decimal" defaultValue={saved.dayTradeLeverage} /></label>
         <label>Overnight buying power (× account)<input name="overnightLeverage" inputMode="decimal" defaultValue={saved.overnightLeverage} /></label>
         <label>Max % of avg daily volume<input name="maxAdvPct" inputMode="decimal" defaultValue={saved.maxAdvPct} /></label>
-        <label>Wheel $ per position<input name="wheelAllocation" inputMode="decimal" defaultValue={saved.wheelAllocation} /></label>
         <button type="submit" style={{ alignSelf: "flex-end" }}>Save sizing</button>
       </form>
       {overrides && (

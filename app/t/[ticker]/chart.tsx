@@ -17,7 +17,12 @@ const RANGES = [
 
 const toTime = (d: string) => (Date.parse(d + "T00:00:00Z") / 1000) as UTCTimestamp;
 
-export function PriceChart({ bars, strikes }: { bars: Bar[]; strikes: { price: number; title: string }[] }) {
+type PriceLine = { price: number; title: string };
+// Shared empty default so the chart effect doesn't rebuild on every render.
+const NO_LINES: PriceLine[] = [];
+
+/** Candles with EMA21 / SMA50 / SMA200 and optional dashed price lines (e.g. a stop). */
+export function PriceChart({ bars, lines = NO_LINES }: { bars: Bar[]; lines?: PriceLine[] }) {
   const el = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const [range, setRange] = useState(126);
@@ -52,14 +57,14 @@ export function PriceChart({ bars, strikes }: { bars: Bar[]; strikes: { price: n
     overlay(smaSeries(closes, 50), "#4da3ff");
     overlay(smaSeries(closes, 200), "#b180ff");
 
-    for (const s of strikes) {
+    for (const s of lines) {
       candles.createPriceLine({ price: s.price, color: "#26a69a", lineStyle: LineStyle.Dashed, lineWidth: 1, axisLabelVisible: true, title: s.title });
     }
     return () => {
       chart.remove();
       chartRef.current = null;
     };
-  }, [bars, strikes]);
+  }, [bars, lines]);
 
   useEffect(() => {
     const chart = chartRef.current;

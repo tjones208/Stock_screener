@@ -17,8 +17,6 @@ export type SizingSettings = {
   maxPosition: number;
   /** Most of account equity (%) in any one stock position. 0 = no cap. */
   maxPositionPct: number;
-  /** Dollars of cash collateral per wheel position (cash-secured puts). */
-  wheelAllocation: number;
 };
 
 export const DEFAULT_SIZING: SizingSettings = {
@@ -29,7 +27,6 @@ export const DEFAULT_SIZING: SizingSettings = {
   maxAdvPct: 1,
   maxPosition: 0,
   maxPositionPct: 0,
-  wheelAllocation: 5_000,
 };
 
 /**
@@ -64,7 +61,6 @@ export function normalizeSizing(input: Partial<Record<keyof SizingSettings, unkn
     maxAdvPct: [0.01, 100],
     maxPosition: [0, 1e9],
     maxPositionPct: [0, 100],
-    wheelAllocation: [100, 1e9],
   };
   for (const k of Object.keys(limits) as (keyof SizingSettings)[]) {
     const v = Number(input?.[k]);
@@ -75,17 +71,17 @@ export function normalizeSizing(input: Partial<Record<keyof SizingSettings, unkn
 }
 
 export type Size = {
-  /** Shares for stock trades, contracts for the wheel. */
+  /** Shares. */
   qty: number;
-  unit: "sh" | "ct";
-  /** Dollars deployed (shares × entry, or cash collateral for puts). */
+  unit: "sh";
+  /** Dollars deployed (shares × fill price). */
   position: number;
-  /** Dollars lost if the stop is hit (for the wheel: loss at breakeven-to-zero is not meaningful, so 0). */
+  /** Dollars lost if the stop is hit. */
   risk: number;
   /** Dollars made if the target is hit. */
   reward: number;
   /** Which limit set the size. */
-  cap: "risk" | "buying power" | "max position" | "liquidity" | "allocation";
+  cap: "risk" | "buying power" | "max position" | "liquidity";
   /** Settings actually used (after strategy overrides), for display. */
   used?: SizingSettings;
 };
@@ -98,14 +94,6 @@ export function sizePosition(
   overrides?: SizingOverrides,
 ): Size | null {
   const s = applyOverrides(settings, overrides);
-  if (l.side === "Sell put") {
-    if (r.put_strike == null) return null;
-    const collateral = r.put_strike * 100;
-    const qty = Math.floor(s.wheelAllocation / collateral);
-    if (qty < 1) return null;
-    // Credit collected = mid × 100 per contract; buying back at target keeps (entry − target) × 100.
-    return { qty, unit: "ct", position: qty * collateral, risk: 0, reward: qty * (l.entry - l.target) * 100, cap: "allocation" };
-  }
 
   // Next-open plans size off the worst allowed fill (top of the open range) and stop-limit plans off
   // the limit price, so a fill anywhere in the allowed range can't push the loss past the budget.

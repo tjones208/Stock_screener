@@ -1,8 +1,6 @@
 import "server-only";
 import { db, fetchAll, upsertChunks } from "./db";
 import { dailyRange, financials, groupedDaily, listTickers, tickerDetails, type FinancialReport } from "./massive";
-import { putChain } from "./alpaca";
-import { rankPuts, DEFAULT_WHEEL } from "./wheel";
 import { evaluateRules, type AlertRule } from "./alerts";
 import { cleanFilters, dbConditions, type Filters, type ScreenerRow } from "./screen";
 import { pushAll } from "./push";
@@ -201,80 +199,6 @@ export async function nightlyEod() {
 
 // ───────────── Options scan ─────────────
 
-export async function scanOptions(budgetMs = 270_000, limit = 150) {
-  const left = deadline(budgetMs);
-  const { data: latest } = await db().from("ss_indicators").select("as_of").order("as_of", { ascending: false }).limit(1);
-  const found = latest?.[0]?.as_of as string | undefined;
-  if (!found) return { scanned: 0, note: "no indicators yet" };
-  const asOf: string = found;
-
-  const watch = await watchlistTickers();
-  const { data: liquid } = await db()
-    .from("ss_indicators")
-    .select("ticker, close, avg_vol20")
-    .eq("as_of", asOf)
-    .gte("close", 5)
-    .lte("close", DEFAULT_WHEEL.maxCollateral / 100)
-    .gte("avg_vol20", 500_000)
-    .order("avg_vol20", { ascending: false })
-    .limit(limit * 2);
-  const { data: watchRows } = watch.size
-    ? await db().from("ss_indicators").select("ticker, close, avg_vol20").in("ticker", [...watch])
-    : { data: [] };
-
-  // Skip names we already know have no options; watchlist names always get scanned.
-  const { data: noOpt } = await db().from("ss_tickers").select("ticker").eq("has_options", false);
-  const skip = new Set((noOpt ?? []).map((r) => r.ticker));
-  const seen = new Set<string>();
-  const universe: { ticker: string; close: number }[] = [];
-  for (const r of [...(watchRows ?? []), ...(liquid ?? [])]) {
-    if (seen.has(r.ticker)) continue;
-    if (!watch.has(r.ticker) && (skip.has(r.ticker) || universe.length >= limit)) continue;
-    seen.add(r.ticker);
-    universe.push({ ticker: r.ticker, close: r.close });
-  }
-
-  const expGte = addDays(asOf, DEFAULT_WHEEL.minDte);
-  const expLte = addDays(asOf, DEFAULT_WHEEL.maxDte);
-  let scanned = 0, candidates = 0;
-  const errors: string[] = [];
-  const queue = [...universe];
-
-  async function worker() {
-    while (queue.length && left() > 15_000) {
-      const u = queue.shift()!;
-      try {
-        const strikeCap = Math.min(u.close, DEFAULT_WHEEL.maxCollateral / 100);
-        const chain = await putChain(u.ticker, u.close, expGte, expLte, strikeCap);
-        await db().from("ss_tickers").update({ has_options: chain.length > 0 }).eq("ticker", u.ticker);
-        const ranked = rankPuts(chain, asOf).slice(0, 5);
-        if (ranked.length) {
-          const { error } = await db().from("ss_option_candidates").upsert(
-            ranked.map((p) => ({
-              as_of: asOf, ticker: p.ticker, contract: p.contract, side: p.side, expiration: p.expiration,
-              dte: p.dte, strike: p.strike, underlying: p.underlying, bid: p.bid, ask: p.ask, mid: p.mid,
-              last: p.last, iv: p.iv, delta: p.delta, theta: p.theta, open_interest: p.openInterest,
-              volume: p.volume, spread_pct: p.spreadPct, otm_pct: p.otmPct, collateral: p.collateral,
-              annual_yield: p.annualYield, score: p.score,
-            })),
-            { onConflict: "as_of,contract" },
-          );
-          if (error) throw new Error(error.message);
-          candidates += ranked.length;
-        }
-        scanned++;
-      } catch (e) {
-        errors.push(`${u.ticker}: ${String(e).slice(0, 120)}`);
-      }
-    }
-  }
-  await Promise.all([worker(), worker(), worker()]);
-  await db().from("ss_option_candidates").delete().lt("as_of", addDays(asOf, -30));
-  return { asOf, universe: universe.length, scanned, candidates, errors: errors.slice(0, 10) };
-}
-
-// ───────────── Alerts ─────────────
-
 export async function loadScreener(): Promise<ScreenerRow[]> {
   return fetchAll<ScreenerRow>((a, b) => db().from("ss_screener").select("*").order("ticker").range(a, b));
 }
@@ -285,10 +209,9 @@ export async function loadScreener(): Promise<ScreenerRow[]> {
  */
 export async function loadScreenerFor(filters: Filters): Promise<ScreenerRow[]> {
   const conds = dbConditions(filters);
-  const build = <Q extends { gte: Function; lte: Function; eq: Function; not: Function }>(q: Q): Q => {
+  const build = <Q extends { gte: Function; lte: Function; eq: Function }>(q: Q): Q => {
     for (const c of conds) {
-      if (c.op === "notNull") q = q.not(c.col, "is", null);
-      else q = (q[c.op] as Function).call(q, c.col, c.value);
+      q = (q[c.op] as Function).call(q, c.col, c.value);
     }
     return q;
   };

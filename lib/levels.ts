@@ -4,14 +4,14 @@
 import type { ScreenerRow } from "./screen.ts";
 
 export type Levels = {
-  side: "Long" | "Short" | "Sell put";
+  side: "Long" | "Short";
   /** Price that triggers the trade (a buy/sell-stop above/below, or a limit for reversion). */
   entry: number;
-  /** Where the idea is wrong. For the wheel this is the breakeven if assigned. */
+  /** Where the idea is wrong. */
   stop: number;
-  /** Profit-taking level. For the wheel this is the buy-back price for the put. */
+  /** Profit-taking level. */
   target: number;
-  /** Reward ÷ risk (null for the wheel, where it isn't meaningful). */
+  /** Reward ÷ risk. */
   rr: number | null;
   /** How the entry is triggered, in a few words. */
   how: string;
@@ -36,7 +36,6 @@ export type Levels = {
 
 /** One-line description of each strategy's level rules, shown under the playbook. */
 export const LEVEL_RULES: Record<string, string> = {
-  wheel: "Sell the listed put for the mid price. Take profit by buying it back at 50% of the credit. The stop column shows your breakeven if assigned (strike − credit).",
   vwap: "Fade toward today's VWAP: enter 0.75 ATR beyond VWAP (below it to buy, above it to short), target VWAP, stop 0.5 ATR past the entry. Recheck against the live VWAP tomorrow.",
   orb: "Buy a break of today's high (short a break of today's low if it closed weak). Stop 0.5 ATR back, target 2R. Tighten to the actual opening range once the session starts.",
   gap_go: "Buy a break of today's high. Stop at the higher of today's midpoint or entry − 1 ATR. Target 2R.",
@@ -83,17 +82,6 @@ const twoR = (side: "Long" | "Short", entry: number, stop: number) =>
 
 export function levelsFor(strategy: string, r: ScreenerRow): Levels | null {
   const { close, atr14: atr, day_high: hi, day_low: lo } = r;
-  if (strategy === "wheel") {
-    if (r.put_strike == null || r.put_mid == null) return null;
-    return {
-      side: "Sell put",
-      entry: round(r.put_mid),
-      stop: round(r.put_strike - r.put_mid),
-      target: round(r.put_mid * 0.5),
-      rr: null,
-      how: `Sell ${r.put_strike}P ${r.put_expiration ?? ""} for ~$${r.put_mid.toFixed(2)}`,
-    };
-  }
   if (close == null || atr == null || !(atr > 0)) return null;
   // Too volatile for mechanical levels to mean anything (e.g. pump-and-dump microcaps).
   if (atr / close > MAX_ATR_PCT) return null;

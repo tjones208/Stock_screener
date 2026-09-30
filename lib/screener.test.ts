@@ -1,42 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseOcc, rankPuts, scorePut, type RawPut } from "./wheel.ts";
 import { emaSeries, smaSeries, wilderRsi } from "./indicators.ts";
 import { applyFilters, cleanFilters, dbConditions, earningsStatus, earningsWithin, pullbackConfirmation, reversalPattern, supportTest, tradingDaysBetween, type ScreenerRow } from "./screen.ts";
 import { evaluateRules, type AlertRule } from "./alerts.ts";
-
-test("parseOcc", () => {
-  assert.deepEqual(parseOcc("F251121P00010500"), { root: "F", expiration: "2025-11-21", side: "put", strike: 10.5 });
-  assert.equal(parseOcc("garbage"), null);
-});
-
-const put = (o: Partial<RawPut>): RawPut => ({
-  contract: "SOFI261030P00015000", ticker: "SOFI", expiration: "2026-10-30", strike: 15, underlying: 16.5,
-  bid: 0.4, ask: 0.46, last: 0.43, iv: 0.62, delta: -0.24, theta: -0.01, openInterest: 1200, volume: 0, ...o,
-});
-
-test("rankPuts filters and scores", () => {
-  const ranked = rankPuts([
-    put({}),
-    put({ contract: "A", strike: 60, underlying: 61 }), // collateral > $5k
-    put({ contract: "B", delta: -0.5 }), // too much delta
-    put({ contract: "C", bid: 0.1, ask: 0.5 }), // spread too wide
-    put({ contract: "D", expiration: "2026-10-05" }), // DTE < 14
-    put({ contract: "E", openInterest: 5 }), // illiquid
-  ], "2026-09-28");
-  assert.equal(ranked.length, 1);
-  const p = ranked[0];
-  assert.equal(p.dte, 32);
-  assert.ok(Math.abs(p.mid - 0.43) < 1e-9);
-  assert.ok(Math.abs(p.annualYield - (0.43 / 15) * (365 / 32)) < 1e-9);
-  assert.ok(p.score > 0 && p.score <= 100);
-});
-
-test("score prefers higher yield, all else equal", () => {
-  const base = { iv: 0.5, delta: -0.2, openInterest: 500, spreadPct: 0.1 };
-  assert.ok(scorePut({ ...base, annualYield: 0.4 }) > scorePut({ ...base, annualYield: 0.2 }));
-  assert.ok(scorePut({ ...base, annualYield: 0.3, delta: -0.15 }) > scorePut({ ...base, annualYield: 0.3, delta: -0.3 }));
-});
 
 test("ema/sma", () => {
   const v = [1, 2, 3, 4, 5, 6];
@@ -48,13 +14,12 @@ test("ema/sma", () => {
 
 const row = (o: Partial<ScreenerRow>): ScreenerRow => ({
   ticker: "F", name: "Ford", type: "CS", exchange: "XNYS", sector: "Consumer Discretionary", industry: null,
-  market_cap: 4e10, in_sp500: true, has_options: true, as_of: "2026-09-28", close: 11, change_pct: 1, gap_pct: 0.5,
+  market_cap: 4e10, in_sp500: true, as_of: "2026-09-28", close: 11, change_pct: 1, gap_pct: 0.5,
   volume: 5e7, avg_vol20: 4e7, vol_ratio: 1.25, sma20: 10.5, sma50: 10.2, sma200: 10.4, sma50_prev: 10.1, sma200_prev: 10.4,
   ema9: 10.8, ema21: 10.6, rsi14: 58, atr14: 0.3, hv30: 0.28, high_52w: 12, low_52w: 8.5, pct_from_high: -8.3, pct_from_low: 29,
   pe: 7, ps: 0.2, pb: 1, eps_ttm: 1.5, revenue_ttm: 1.8e11, revenue_growth_yoy: 4, gross_margin: 8, operating_margin: 3,
   net_margin: 2.5, roe: 10, debt_to_equity: 5, current_ratio: 1.1, free_cash_flow_ttm: null, dividend_yield: null,
-  next_earnings_date: null, put_contract: "F261030P00010000", put_expiration: "2026-10-30", put_dte: 32, put_strike: 10,
-  put_mid: 0.2, put_iv: 0.35, put_delta: -0.22, put_oi: 5000, put_spread_pct: 0.05, put_annual_yield: 0.23, wheel_score: 40,
+  next_earnings_date: null,
   vwap: 10.9, range_pos: 60, change_5d: 1, change_20d: 3, nr7: false, inside_day: false,
   day_open: 10.8, day_high: 11.2, day_low: 10.7, sma10: 11.3, prev_open: 11.1, prev_close: 10.9,
   ema20: 10.9, ema20_5d: 10.8, swing_low5: 10.6, swing_high20: 12.2, resistance60: 11.5, rsi_min5: 45, ...o,
@@ -66,15 +31,16 @@ test("filters", () => {
   assert.deepEqual(Object.keys(f).sort(), ["above_sma200", "close_max"]);
   assert.equal(cleanFilters({ side: "short" }).side, "short"); // side survives (applied from trade plans in the page)
   assert.deepEqual(applyFilters(rows, f).map((r) => r.ticker), ["F"]);
-  assert.deepEqual(applyFilters(rows, { put_annual_yield_min: "20" }).map((r) => r.ticker).sort(), ["F", "X", "Y"]);
-  assert.deepEqual(applyFilters(rows, { put_annual_yield_min: "30" }), []);
-  assert.deepEqual(applyFilters(rows, { put_delta_max: "0.2" }), []); // abs(-0.22) > 0.2
+  assert.deepEqual(applyFilters(rows, { rsi14_min: "50" }).map((r) => r.ticker).sort(), ["F", "X", "Y"]);
+  assert.deepEqual(applyFilters(rows, { rsi14_min: "60" }), []);
+  // Options filters are gone with the wheel: they're dropped like any unknown key.
+  assert.deepEqual(cleanFilters({ put_annual_yield_min: "20", has_put: "1" }), {});
 });
 
 test("alerts", () => {
   const rules: AlertRule[] = [
     { id: 1, name: "cross", kind: "golden_cross", ticker: null, screen_id: null, watchlist_id: 7, params: {}, enabled: true },
-    { id: 2, name: "yield", kind: "wheel_yield", ticker: "F", screen_id: null, watchlist_id: null, params: { min_yield: 20 }, enabled: true },
+    { id: 2, name: "above", kind: "price_above", ticker: "F", screen_id: null, watchlist_id: null, params: { price: 10 }, enabled: true },
     { id: 3, name: "rsi", kind: "rsi_below", ticker: "F", screen_id: null, watchlist_id: null, params: { value: 30 }, enabled: true },
   ];
   const rows = [row({ sma50: 10.5, sma50_prev: 10.3 }), row({ ticker: "G", sma50: 10.5, sma50_prev: 10.3 })];
@@ -125,8 +91,7 @@ test("strategy levels", async () => {
   const vwapLong = levelsFor("vwap", row({ ...base, close: 10.6 }))!;
   assert.deepEqual([vwapLong.side, vwapLong.entry, vwapLong.target], ["Long", 10.6, 10.9]);
 
-  const wheel = levelsFor("wheel", base)!; // strike 10, mid 0.20
-  assert.deepEqual([wheel.side, wheel.entry, wheel.stop, wheel.target, wheel.rr], ["Sell put", 0.2, 9.8, 0.1, null]);
+  assert.equal(levelsFor("wheel", base), null); // the wheel preset is gone
 
   const over = levelsFor("oversold", base)!; // SMA10 11.3 above close → target the 10-day average
   assert.equal(over.target, 11.3);
@@ -161,11 +126,6 @@ test("position sizing", async () => {
   // Shorts size the same way off |entry − stop|.
   const short = { side: "Short" as const, entry: 20, stop: 20.5, target: 19, rr: 2, how: "" };
   assert.equal(sizePosition(short, row({ avg_vol20: 10_000_000 }), false)!.qty, 2400);
-
-  // Wheel: $5,000 ÷ ($10 strike × 100) = 5 contracts; profit at 50% buy-back of a $0.20 credit = $50.
-  const put = { side: "Sell put" as const, entry: 0.2, stop: 9.8, target: 0.1, rr: null, how: "" };
-  const w = sizePosition(put, row({}), false)!;
-  assert.deepEqual([w.qty, w.unit, w.position, Math.round(w.reward)], [5, "ct", 5000, 50]);
 
   // Settings: bad or out-of-range input falls back to the defaults.
   const s = normalizeSizing({ account: "250000", riskPct: "abc", maxAdvPct: "-1", dayTradeLeverage: 4 });
@@ -356,12 +316,11 @@ test("pullback logic fixes: multi-day test, RSI over the pullback, reclaim, ETFs
 });
 
 test("dbConditions pushes only plain column filters", () => {
-  const c = dbConditions({ close_min: "5", rsi14_max: "30", atr_pct_max: "12", gap_abs_min: "2", sector: "Energy", sp500: "1", has_put: "1", q: "AA", exclude_etfs: "1" });
+  const c = dbConditions({ close_min: "5", rsi14_max: "30", atr_pct_max: "12", gap_abs_min: "2", sector: "Energy", sp500: "1", q: "AA", exclude_etfs: "1" });
   assert.deepEqual(c, [
     { op: "gte", col: "close", value: 5 },
     { op: "lte", col: "rsi14", value: 30 },
     { op: "eq", col: "sector", value: "Energy" },
     { op: "eq", col: "in_sp500", value: true },
-    { op: "notNull", col: "put_contract" },
   ]);
 });

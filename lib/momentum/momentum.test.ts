@@ -295,9 +295,9 @@ test("hand-added positions: warnings for each broken rule, none when it fits", (
   assert.match(manualWarnings(top, cfg)[0], /Top-ups are only allowed at month-end/);
 });
 
-import { callsToClose, callWindow, coverableContracts, monthEndOf, pickCall } from "./calls.ts";
+import { callsToClose, callWindow, coverableContracts, monthEndOf, occCall } from "./calls.ts";
 
-test("covered calls: round lots only, expire before month-end and earnings, far OTM pick", () => {
+test("covered calls: round lots only, expire before month-end and earnings", () => {
   const cfg = MOM_DEFAULTS;
   assert.equal(coverableContracts(168, 0), 1);
   assert.equal(coverableContracts(99, 0), 0);
@@ -310,18 +310,8 @@ test("covered calls: round lots only, expire before month-end and earnings, far 
   // Too late in the month to leave min_dte before month-end → no call.
   assert.equal(callWindow(cal, "2026-10-27", null, cfg), null);
 
-  const mk = (expiration: string, strike: number, delta: number, bid: number, ask: number, oi = 500) =>
-    ({ contract: `X${expiration}${strike}`, ticker: "X", expiration, strike, underlying: 12.64, bid, ask, last: null, iv: 0.3, delta, theta: null, openInterest: oi, volume: null });
-  const chain = [
-    mk("2026-10-16", 14, 0.18, 0.1, 0.14),
-    mk("2026-10-30", 14, 0.19, 0.16, 0.2),   // latest expiry in band → pick
-    mk("2026-10-30", 13, 0.32, 0.3, 0.34),   // delta too high (too likely to be called away)
-    mk("2026-10-30", 15, 0.08, 0.05, 0.08),  // delta too low
-    mk("2026-11-20", 14, 0.2, 0.3, 0.34),    // past month-end
-    mk("2026-10-30", 14.5, 0.16, 0.12, 0.3), // spread too wide
-  ];
-  const p = pickCall(chain, 12.64, "2026-10-01", { gte: "2026-10-06", lte: "2026-10-30" }, cfg)!;
-  assert.deepEqual([p.expiration, p.strike, p.dte], ["2026-10-30", 14, 29]);
+  assert.equal(occCall("DRH", "2026-10-30", 14), "DRH261030C00014000");
+  assert.equal(occCall("F", "2026-11-20", 12.5), "F261120C00012500");
   // Before selling shares: close all calls on a full exit; on a trim keep what remaining shares cover.
   assert.equal(callsToClose(168, 168, 1), 1);
   assert.equal(callsToClose(250, 100, 2), 1);

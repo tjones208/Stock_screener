@@ -3,9 +3,9 @@ import "./globals.css";
 import { TabBar } from "./tabbar";
 
 export const metadata: Metadata = {
-  title: "Wheel Screener",
-  description: "Personal stock screener for the wheel strategy",
-  appleWebApp: { capable: true, title: "Wheel", statusBarStyle: "black-translucent" },
+  title: "Stock Screener",
+  description: "Personal stock screener and momentum strategy",
+  appleWebApp: { capable: true, title: "Screener", statusBarStyle: "black-translucent" },
 };
 
 export const viewport: Viewport = {

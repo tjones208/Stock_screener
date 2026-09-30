@@ -2,7 +2,7 @@ export default async function Login({ searchParams }: { searchParams: Promise<{ 
   const { next, error } = await searchParams;
   return (
     <main style={{ maxWidth: 360, paddingTop: 80 }}>
-      <h1>Wheel Screener</h1>
+      <h1>Stock Screener</h1>
       <form method="post" action="/api/login" className="panel" style={{ display: "grid", gap: 12 }}>
         <input type="hidden" name="next" value={next ?? "/"} />
         <label>

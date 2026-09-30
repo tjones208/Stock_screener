@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { db } from "@/lib/db";
-import { num, pct, signClass } from "@/lib/format";
+import { big, num, pct, signClass } from "@/lib/format";
 import type { ScreenerRow } from "@/lib/screen";
 import { addToWatchlist, createWatchlist, deleteWatchlist, removeFromWatchlist } from "../actions";
 
@@ -20,7 +20,7 @@ export default async function Watchlists() {
   return (
     <main>
       <h1>Watchlists</h1>
-      <p className="muted">Watchlist tickers get their options scanned every night, fundamentals fetched first, and full price history kept.</p>
+      <p className="muted">Watchlist tickers get their fundamentals fetched first and keep their full price history.</p>
       {(lists ?? []).map((l) => {
         const its = (items ?? []).filter((i) => i.watchlist_id === l.id);
         return (
@@ -40,7 +40,7 @@ export default async function Watchlists() {
             {its.length > 0 && (
               <div className="table-wrap">
                 <table>
-                  <thead><tr><th>Ticker</th><th>Price</th><th>Chg</th><th>RSI</th><th>Best put</th><th>Yield/yr</th><th>Δ</th><th></th></tr></thead>
+                  <thead><tr><th>Ticker</th><th>Price</th><th>Chg</th><th>RSI</th><th>RVOL</th><th>From 52w high</th><th>Mkt cap</th><th></th></tr></thead>
                   <tbody>
                     {its.map((i) => {
                       const r = byTicker.get(i.ticker);
@@ -50,9 +50,9 @@ export default async function Watchlists() {
                           <td>{num(r?.close)}</td>
                           <td className={signClass(r?.change_pct)}>{pct(r?.change_pct)}</td>
                           <td>{num(r?.rsi14, 0)}</td>
-                          <td>{r?.put_strike ? `${num(r.put_strike, r.put_strike % 1 ? 1 : 0)}P ${r.put_expiration?.slice(5)}` : "—"}</td>
-                          <td>{pct(r?.put_annual_yield, 0, 100)}</td>
-                          <td>{r?.put_delta == null ? "—" : num(Math.abs(r.put_delta))}</td>
+                          <td>{num(r?.vol_ratio, 1)}×</td>
+                          <td className={signClass(r?.pct_from_high)}>{pct(r?.pct_from_high, 0)}</td>
+                          <td>{big(r?.market_cap)}</td>
                           <td>
                             <form action={removeFromWatchlist}>
                               <input type="hidden" name="watchlist_id" value={l.id} />

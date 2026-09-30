@@ -2,8 +2,8 @@ import type { MetadataRoute } from "next";
 
 export default function manifest(): MetadataRoute.Manifest {
   return {
-    name: "Wheel Screener",
-    short_name: "Wheel",
+    name: "Stock Screener",
+    short_name: "Screener",
     start_url: "/",
     display: "standalone",
     background_color: "#0b0f14",

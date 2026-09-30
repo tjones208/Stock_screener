@@ -57,7 +57,7 @@ export default async function Alerts() {
         </label>
         <button type="submit" style={{ alignSelf: "flex-end" }}>Add alert</button>
       </form>
-      <p className="muted">Alerts are checked once each trading morning after the options scan (≈ 6:30am ET, before the open), using the previous day&apos;s close. Each rule fires at most once per ticker per day.</p>
+      <p className="muted">Alerts are checked once each trading morning (≈ 6:25am ET, before the open), using the previous day&apos;s close. Each rule fires at most once per ticker per day.</p>
 
       <h2>Rules</h2>
       <div className="card-list">

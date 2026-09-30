@@ -45,15 +45,13 @@ export const MOM_DEFAULTS = {
   entry_max_retry_days: 5,
   min_B_stock_version: 8_000,
   fractional_shares: false,
-  // Covered calls (not in the original spec): only on positions already holding 100+ shares,
-  // far out of the money, expiring before the next month-end rebalance and before earnings.
+  // Covered calls (not in the original spec): sold in your broker on positions already holding
+  // 100+ shares, far out of the money (delta guidance below), expiring before the next month-end
+  // rebalance and before earnings.
   covered_calls: true,
   call_delta_min: 0.15,
   call_delta_max: 0.2,
   call_min_dte: 5,
-  call_min_open_interest: 50,
-  call_min_bid: 0.05,
-  call_max_spread_pct: 0.35,
 };
 
 export type MomConfig = typeof MOM_DEFAULTS;
@@ -104,13 +102,10 @@ export const MOM_FIELDS: { key: MomKey; label: string; group: string }[] = [
   { key: "lt_tax_window_days", label: "Long-term tax window (calendar days)", group: "Tax" },
   { key: "wash_sale_block_days", label: "Wash-sale block (calendar days)", group: "Tax" },
   { key: "min_B_stock_version", label: "Min B for the stock version ($)", group: "Account" },
-  { key: "covered_calls", label: "Suggest covered calls", group: "Covered calls" },
-  { key: "call_delta_min", label: "Call delta min", group: "Covered calls" },
-  { key: "call_delta_max", label: "Call delta max", group: "Covered calls" },
+  { key: "covered_calls", label: "Show covered-call section", group: "Covered calls" },
+  { key: "call_delta_min", label: "Suggested call delta min", group: "Covered calls" },
+  { key: "call_delta_max", label: "Suggested call delta max", group: "Covered calls" },
   { key: "call_min_dte", label: "Min days to expiration", group: "Covered calls" },
-  { key: "call_min_open_interest", label: "Min open interest", group: "Covered calls" },
-  { key: "call_min_bid", label: "Min bid ($)", group: "Covered calls" },
-  { key: "call_max_spread_pct", label: "Max bid-ask spread (fraction of mid)", group: "Covered calls" },
 ];
 
 /** Merge stored values over the defaults, keeping only well-typed, non-negative numbers. */

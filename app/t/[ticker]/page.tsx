@@ -27,15 +27,8 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
   ]);
   if (!row && !bars.length) notFound();
 
-  const { data: puts } = row?.as_of
-    ? await db().from("ss_option_candidates").select("*").eq("ticker", ticker)
-        .eq("as_of", (await db().from("ss_option_candidates").select("as_of").eq("ticker", ticker).order("as_of", { ascending: false }).limit(1)).data?.[0]?.as_of ?? "1900-01-01")
-        .order("score", { ascending: false })
-    : { data: [] };
-
   const inLists = new Set((memberships ?? []).map((m) => m.watchlist_id));
   const r = row;
-  const strikes = (puts ?? []).slice(0, 1).map((p) => ({ price: p.strike, title: `${p.strike}P` }));
 
   return (
     <main>
@@ -51,7 +44,7 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
       </div>
 
       <div style={{ margin: "12px 0" }}>
-        <PriceChart bars={bars} strikes={strikes} />
+        <PriceChart bars={bars} />
       </div>
 
       <div className="row">
@@ -72,39 +65,6 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
         )}
         <a className="btn ghost" href={`https://robinhood.com/options/chains/${ticker}`} target="_blank" rel="noreferrer">Open chain in Robinhood ↗</a>
       </div>
-
-      <h2>Wheel: short put candidates</h2>
-      {puts?.length ? (
-        <>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr><th>Contract</th><th>DTE</th><th>Bid/Ask</th><th>Mid</th><th>Yield/yr</th><th>Δ</th><th>IV</th><th>OI</th><th>OTM</th><th>Collateral</th><th>Score</th></tr>
-              </thead>
-              <tbody>
-                {puts.map((p) => (
-                  <tr key={p.contract}>
-                    <td><b>{num(p.strike, p.strike % 1 ? 1 : 0)}P</b> {p.expiration}</td>
-                    <td>{p.dte}</td>
-                    <td>{num(p.bid)} / {num(p.ask)}</td>
-                    <td>{num(p.mid)}</td>
-                    <td>{pct(p.annual_yield, 0, 100)}</td>
-                    <td>{p.delta == null ? "—" : num(Math.abs(p.delta))}</td>
-                    <td>{pct(p.iv, 0, 100)}</td>
-                    <td>{big(p.open_interest)}</td>
-                    <td>{pct(p.otm_pct, 1, 100)}</td>
-                    <td>{money(p.collateral, 0)}</td>
-                    <td className="score">{num(p.score, 0)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <div className="notice">Premiums are from Alpaca&apos;s free indicative feed (delayed and modified quotes) as of the last nightly scan. Confirm in Robinhood before trading.</div>
-        </>
-      ) : (
-        <div className="muted">No wheel-eligible puts in the last scan (needs strike ≤ $50, 14–50 DTE, delta 0.10–0.35, OI ≥ 50). Add it to a watchlist so it&apos;s scanned every night.</div>
-      )}
 
       <h2>Technicals</h2>
       <div className="grid">

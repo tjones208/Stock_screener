@@ -99,7 +99,7 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
       <nav className="mnav">
         <a href="#sell"><span className="tag tag-sell">SELL</span> {sells.length}</a>
         <a href="#buy"><span className="tag tag-buy">BUY</span> {buys.length}</a>
-        <a href="#calls"><span className="tag tag-call">CALL</span> {ideas.filter((i) => i.contract).length + calls.length}</a>
+        <a href="#calls"><span className="tag tag-call">CALL</span> {ideas.filter((i) => i.exp_latest).length + calls.length}</a>
         <a href="#hold"><span className="tag tag-hold">HOLD</span> {lots.length}</a>
         <a href="#watch"><span className="tag tag-watch">WATCH</span> {watchCount}</a>
         <a href="#info"><span className="tag tag-info">INFO</span></a>
@@ -131,10 +131,10 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
         <TicketsSection open={buys} cfg={cfg} />
       </Section>
 
-      <Section id="calls" tag="call" title="Covered calls" count={ideas.filter((i) => i.contract).length + calls.length}
-        open={ideas.some((i) => i.contract) || calls.some((c) => c.status === "assign_pending")}
-        hint="Sell-to-open suggestions for positions with 100+ shares, and the calls you've sold">
-        <CallsSection ideas={ideas} calls={calls} lastClose={lastClose} />
+      <Section id="calls" tag="call" title="Covered calls" count={ideas.filter((i) => i.exp_latest).length + calls.length}
+        open={ideas.some((i) => i.exp_latest) || calls.some((c) => c.status === "assign_pending")}
+        hint="Positions with 100+ shares you can sell a call on in Robinhood, and the calls you've recorded">
+        <CallsSection ideas={ideas} calls={calls} lastClose={lastClose} cfg={cfg} />
       </Section>
 
       <Section id="hold" tag="hold" title="Your positions" count={lots.length} open={lots.length > 0 || !!preview || !!added}
@@ -672,18 +672,17 @@ function AddForm({ preview }: { preview: ManualPreview | null }) {
 }
 
 type CallView = { id: number; ticker: string; contract: string; expiration: string; strike: number; contracts: number; premium: number; status: string; note: string | null };
-type IdeaView = { ticker: string; contracts: number; contract: string | null; expiration: string | null; strike: number | null; dte: number | null;
-  bid: number | null; ask: number | null; mid: number | null; delta: number | null; open_interest: number | null; error: string | null; as_of: string };
+type IdeaView = { ticker: string; contracts: number; exp_earliest: string | null; exp_latest: string | null; note: string | null; as_of: string };
 
-function CallsSection({ ideas, calls, lastClose }: { ideas: IdeaView[]; calls: CallView[]; lastClose: Map<string, number> }) {
+function CallsSection({ ideas, calls, lastClose, cfg }: { ideas: IdeaView[]; calls: CallView[]; lastClose: Map<string, number>; cfg: Awaited<ReturnType<typeof getMomConfig>> }) {
   const pending = calls.filter((c) => c.status === "assign_pending");
   const open = calls.filter((c) => c.status === "open");
   return (
     <>
       <p className="muted">
-        Only on positions that already hold 100+ shares. Suggestions are far out of the money (about 0.15–0.20 delta) and expire before the
-        next month-end rebalance and before earnings. If a call finishes in the money, the shares are called away and count as an exit at the strike.
-        Quotes come from Alpaca&apos;s delayed feed: confirm the premium at your broker.
+        Only on positions that already hold 100+ shares. In Robinhood, pick a call far out of the money (delta about {cfg.call_delta_min}–{cfg.call_delta_max})
+        that expires inside the window shown (before the next month-end rebalance and before earnings), sell it, then record it here.
+        If a call finishes in the money, the shares are called away and count as an exit at the strike.
       </p>
       {pending.map((c) => (
         <div key={c.id} className="notice row spread">
@@ -695,35 +694,31 @@ function CallsSection({ ideas, calls, lastClose }: { ideas: IdeaView[]; calls: C
         </div>
       ))}
 
-      <h3><span className="tag tag-call">SELL TO OPEN</span> Suggested calls</h3>
+      <h3><span className="tag tag-call">SELL TO OPEN</span> Positions you can sell a call on</h3>
       {!ideas.length ? (
         <p className="muted">No position has an uncovered round lot of 100 shares right now.</p>
       ) : (
         <div className="card-list">
           {ideas.map((i) => (
             <div key={i.ticker} className="panel">
-              <div className="row spread">
-                <span><span className="tag tag-call">CALL</span> <b>{i.ticker}</b> · {i.contracts} contract{i.contracts === 1 ? "" : "s"} available ({i.contracts * 100} sh) · last {num(lastClose.get(i.ticker))}</span>
-                {i.contract && <span className="muted">as of {i.as_of}</span>}
+              <div>
+                <span className="tag tag-call">CALL</span> <b>{i.ticker}</b> · {i.contracts} contract{i.contracts === 1 ? "" : "s"} ({i.contracts * 100} sh) · last {num(lastClose.get(i.ticker))}
+                {i.exp_latest
+                  ? <> · expire between <b>{i.exp_earliest}</b> and <b>{i.exp_latest}</b> · delta {cfg.call_delta_min}–{cfg.call_delta_max}</>
+                  : null}
+                {" "}<a href={`https://robinhood.com/options/chains/${i.ticker}`} target="_blank" rel="noreferrer">Open chain in Robinhood ↗</a>
               </div>
-              {i.contract ? (
-                <>
-                  <p style={{ margin: "6px 0" }}>
-                    Sell to open <b>{i.contracts} × {i.ticker} {i.expiration} {num(i.strike)} call</b> ({i.contract}) · {i.dte} days · Δ {num(i.delta)} ·
-                    bid {num(i.bid)} / ask {num(i.ask)} · limit ≈ <b>{num(i.mid)}</b> → about <b>{money((i.mid ?? 0) * 100 * i.contracts, 0)}</b> premium
-                    {i.strike != null && lastClose.get(i.ticker) != null && <> · {pct(i.strike / lastClose.get(i.ticker)! - 1, 1, 100)} above the price</>}
-                  </p>
-                  <form action={sellCall} className="row" style={{ alignItems: "flex-end" }}>
-                    <input type="hidden" name="ticker" value={i.ticker} />
-                    <label>Contract<input name="contract" defaultValue={i.contract} style={{ width: 190 }} /></label>
-                    <label>Contracts<input name="contracts" inputMode="numeric" defaultValue={i.contracts} style={{ width: 70 }} /></label>
-                    <label>Premium $/sh<input name="premium" inputMode="decimal" defaultValue={i.mid ?? ""} style={{ width: 90 }} /></label>
-                    <label>Time (NY)<input type="datetime-local" name="opened_at" /></label>
-                    <button type="submit">I sold this call</button>
-                  </form>
-                </>
-              ) : (
-                <p className="muted" style={{ margin: "6px 0" }}>{i.error}</p>
+              {i.note && <p className="muted" style={{ margin: "6px 0" }}>{i.note}</p>}
+              {i.exp_latest && (
+                <form action={sellCall} className="row" style={{ alignItems: "flex-end", marginTop: 6 }}>
+                  <input type="hidden" name="ticker" value={i.ticker} />
+                  <label>Expiration<input type="date" name="expiration" min={i.exp_earliest ?? undefined} defaultValue={i.exp_latest} /></label>
+                  <label>Strike<input name="strike" inputMode="decimal" style={{ width: 80 }} /></label>
+                  <label>Contracts<input name="contracts" inputMode="numeric" defaultValue={i.contracts} style={{ width: 70 }} /></label>
+                  <label>Premium $/sh<input name="premium" inputMode="decimal" style={{ width: 90 }} /></label>
+                  <label>Time (NY)<input type="datetime-local" name="opened_at" /></label>
+                  <button type="submit">I sold this call</button>
+                </form>
               )}
             </div>
           ))}
@@ -734,7 +729,7 @@ function CallsSection({ ideas, calls, lastClose }: { ideas: IdeaView[]; calls: C
       {!open.length ? <p className="muted">None open.</p> : (
         <div className="table-wrap">
           <table>
-            <thead><tr><th>Ticker</th><th>Contract</th><th>Contracts</th><th>Strike</th><th>Expires</th><th>Premium</th><th>Stock</th><th></th></tr></thead>
+            <thead><tr><th>Ticker</th><th>Contracts</th><th>Strike</th><th>Expires</th><th>Premium</th><th>Stock</th><th style={{ textAlign: "left" }}>Note</th><th></th></tr></thead>
             <tbody>
               {open.map((c) => {
                 const px = lastClose.get(c.ticker);
@@ -742,12 +737,12 @@ function CallsSection({ ideas, calls, lastClose }: { ideas: IdeaView[]; calls: C
                 return (
                   <tr key={c.id}>
                     <td><span className="tag tag-call">CALL</span> <b>{c.ticker}</b></td>
-                    <td>{c.contract}</td>
                     <td>{c.contracts}</td>
                     <td>{num(c.strike)}</td>
                     <td>{c.expiration}</td>
                     <td>{money(c.premium * 100 * c.contracts, 0)}</td>
                     <td className={itm ? "down" : ""}>{num(px)}{itm ? " · in the money" : ""}</td>
+                    <td style={{ textAlign: "left", whiteSpace: "normal", minWidth: 180 }} className="muted">{c.note}</td>
                     <td>
                       <form action={buyBackCall} className="row">
                         <input type="hidden" name="id" value={c.id} />

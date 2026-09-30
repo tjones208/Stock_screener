@@ -10,7 +10,7 @@ export type MarketRegime = { ticker: string; close: number | null; sma200: numbe
 export type Strategy = {
   key: string;
   name: string;
-  style: "Options" | "Day trade" | "Swing";
+  style: "Day trade" | "Swing";
   /** What the preset looks for, in one or two sentences. */
   summary: string;
   /** How to use the list the next session. */
@@ -32,20 +32,6 @@ export type Strategy = {
 };
 
 export const STRATEGIES: Strategy[] = [
-  {
-    key: "wheel",
-    name: "Wheel — cash-secured puts",
-    style: "Options",
-    summary: "Liquid uptrending stocks under $50 with a put at delta ≤ 0.30 paying ≥ 20%/yr and no earnings in the next 30 days.",
-    playbook: "Sell the listed put (or a nearby strike) and roll or take assignment, then sell covered calls. Confirm the premium in Robinhood.",
-    filters: {
-      close_min: "5", close_max: "50", avg_vol20_min: "1000000",
-      above_sma200: "1", has_put: "1", no_earnings_30d: "1",
-      put_delta_max: "0.30", put_annual_yield_min: "20", put_oi_min: "100",
-      sort: "wheel_score", dir: "desc",
-    },
-    columns: ["close", "change_pct", "rsi14", "put", "put_annual_yield", "put_delta", "put_iv", "put_oi", "put_spread_pct", "wheel_score"],
-  },
   {
     key: "vwap",
     name: "VWAP reversion",

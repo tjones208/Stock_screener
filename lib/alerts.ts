@@ -25,7 +25,6 @@ export const ALERT_KINDS = {
   new_52w_high: { label: "New 52-week high", param: null },
   new_52w_low: { label: "New 52-week low", param: null },
   gap: { label: "Gap at open ≥ %", param: "pct" },
-  wheel_yield: { label: "Put annual yield ≥ %", param: "min_yield" },
   screen_match: { label: "New match for saved screen", param: null },
 } as const;
 
@@ -62,10 +61,6 @@ function check(rule: AlertRule, r: ScreenerRow): string | null {
     case "gap":
       return r.gap_pct != null && Math.abs(r.gap_pct) >= (Number.isNaN(p) ? 3 : p)
         ? `${r.ticker} gapped ${r.gap_pct > 0 ? "up" : "down"} ${fmt(Math.abs(r.gap_pct), 1)}%` : null;
-    case "wheel_yield":
-      return r.put_annual_yield != null && r.put_annual_yield * 100 >= p
-        ? `${r.ticker} $${fmt(r.put_strike)}P ${r.put_expiration}: ${fmt(r.put_annual_yield * 100, 0)}%/yr, Δ${fmt(Math.abs(r.put_delta ?? 0))}, mid $${fmt(r.put_mid)}`
-        : null;
     case "screen_match":
       return `${r.ticker} matches “${rule.name}” ($${fmt(r.close)})`;
   }

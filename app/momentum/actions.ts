@@ -9,6 +9,7 @@ import { recordExit } from "@/lib/momentum/positions";
 import { promoteAlternate, recordFill } from "@/lib/momentum/tickets";
 import { addManualLot } from "@/lib/momentum/manual";
 import { closeCall, closeCallsForExit, confirmAssignment, recordCallSold } from "@/lib/momentum/covered";
+import { occCall } from "@/lib/momentum/calls";
 
 export async function saveMomConfig(form: FormData) {
   const current = await getMomConfig();
@@ -168,16 +169,18 @@ export async function undoLot(form: FormData) {
   redirect("/momentum#hold");
 }
 
-/** "I sold this call": record a covered call written against a position's round lots. */
+/** "I sold a call": record a covered call you sold in your broker against a position's round lots. */
 export async function sellCall(form: FormData) {
   const ticker = String(form.get("ticker") ?? "").toUpperCase();
-  const contract = String(form.get("contract") ?? "").trim().toUpperCase();
-  const m = /^([A-Z0-9.]{1,6})(\d{2})(\d{2})(\d{2})C(\d{8})$/.exec(contract);
+  const expiration = String(form.get("expiration") ?? "");
+  const strike = Number(form.get("strike"));
   const contracts = Number(form.get("contracts"));
   const premium = Number(form.get("premium"));
   const at = String(form.get("opened_at") || "");
-  if (!m || !(contracts >= 1) || !(premium > 0)) throw new Error("Enter the call contract (OCC symbol), contracts and the premium per share you received.");
-  await recordCallSold(ticker, contract, `20${m[2]}-${m[3]}-${m[4]}`, Number(m[5]) / 1000, Math.floor(contracts), premium, at ? nyLocalToIso(at) : new Date().toISOString());
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(expiration) || !(strike > 0) || !(contracts >= 1) || !(premium > 0)) {
+    throw new Error("Enter the expiration date, strike, contracts and the premium per share you received.");
+  }
+  await recordCallSold(ticker, occCall(ticker, expiration, strike), expiration, strike, Math.floor(contracts), premium, at ? nyLocalToIso(at) : new Date().toISOString());
   revalidatePath("/momentum");
 }
 

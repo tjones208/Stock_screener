@@ -9,7 +9,6 @@ export type ScreenerRow = {
   industry: string | null;
   market_cap: number | null;
   in_sp500: boolean;
-  has_options: boolean | null;
   as_of: string;
   close: number | null;
   change_pct: number | null;
@@ -46,17 +45,6 @@ export type ScreenerRow = {
   free_cash_flow_ttm: number | null;
   dividend_yield: number | null;
   next_earnings_date: string | null;
-  put_contract: string | null;
-  put_expiration: string | null;
-  put_dte: number | null;
-  put_strike: number | null;
-  put_mid: number | null;
-  put_iv: number | null;
-  put_delta: number | null;
-  put_oi: number | null;
-  put_spread_pct: number | null;
-  put_annual_yield: number | null;
-  wheel_score: number | null;
   vwap: number | null;
   range_pos: number | null;
   change_5d: number | null;
@@ -77,7 +65,7 @@ export type ScreenerRow = {
   rsi_min5: number | null;
 };
 
-export const GROUPS = ["Price & volume", "Day trading", "Technical", "Fundamental", "Wheel"] as const;
+export const GROUPS = ["Price & volume", "Day trading", "Technical", "Fundamental"] as const;
 
 export type NumericField = {
   /** A ScreenerRow column, or a derived key computed by `compute`. Used as the URL filter prefix. */
@@ -137,13 +125,6 @@ export const NUMERIC_FIELDS: NumericField[] = [
   { key: "debt_to_equity", label: "Debt / equity", group: "Fundamental" },
   { key: "current_ratio", label: "Current ratio", group: "Fundamental" },
   { key: "dividend_yield", label: "Dividend yield", group: "Fundamental", unit: "%" },
-  { key: "put_annual_yield", label: "Put annual yield", group: "Wheel", unit: "%", scale: 100 },
-  { key: "put_iv", label: "Put IV", group: "Wheel", unit: "%", scale: 100 },
-  { key: "put_delta", label: "Put delta (abs)", group: "Wheel", abs: true },
-  { key: "put_oi", label: "Put open interest", group: "Wheel" },
-  { key: "put_spread_pct", label: "Put bid/ask spread", group: "Wheel", unit: "%", scale: 100 },
-  { key: "put_dte", label: "Put days to expiry", group: "Wheel" },
-  { key: "wheel_score", label: "Wheel score", group: "Wheel" },
 ];
 
 export const BOOL_FILTERS = {
@@ -161,7 +142,6 @@ export const BOOL_FILTERS = {
   death_cross: { label: "Death cross today", test: deathCross },
   near_52w_high: { label: "Within 3% of 52w high", test: (r: ScreenerRow) => (r.pct_from_high ?? -99) >= -3 },
   near_52w_low: { label: "Within 3% of 52w low", test: (r: ScreenerRow) => (r.pct_from_low ?? 99) <= 3 },
-  has_put: { label: "Has a wheel-eligible put", test: (r: ScreenerRow) => r.put_contract != null },
   sp500: { label: "S&P 500 only", test: (r: ScreenerRow) => r.in_sp500 },
   green_close: { label: "Green close (close > open)", test: (r: ScreenerRow) => gt(r.close, r.day_open) },
   ema20_above_sma50: { label: "EMA 20 above SMA 50", test: (r: ScreenerRow) => gt(r.ema20, r.sma50) },
@@ -185,7 +165,7 @@ export type BoolKey = keyof typeof BOOL_FILTERS;
 /** Flat filter map, identical to the screener URL query: close_max=50&rsi14_min=30&above_sma200=1&sector=Technology */
 export type Filters = Record<string, string>;
 
-export const DEFAULT_FILTERS: Filters = { close_min: "5", close_max: "50", avg_vol20_min: "500000" };
+export const DEFAULT_FILTERS: Filters = { close_min: "5", avg_vol20_min: "500000" };
 
 function gt(a: number | null, b: number | null) {
   return a != null && b != null && a > b;
@@ -326,7 +306,7 @@ export function matches(r: ScreenerRow, filters: Filters): boolean {
 export function applyFilters(rows: ScreenerRow[], filters: Filters): ScreenerRow[] {
   const out = rows.filter((r) => matches(r, filters));
   const dir = filters.dir === "asc" ? 1 : -1;
-  const get = sortGetter(filters.sort || "wheel_score");
+  const get = sortGetter(filters.sort || "dollar_vol");
   return out.sort((a, b) => {
     const av = get(a), bv = get(b);
     if (av == null && bv == null) return a.ticker.localeCompare(b.ticker);
@@ -364,8 +344,7 @@ export function cleanFilters(input: Record<string, string | string[] | undefined
 /** A filter the database can apply before rows are downloaded. */
 export type DbCondition =
   | { op: "gte" | "lte"; col: keyof ScreenerRow; value: number }
-  | { op: "eq"; col: keyof ScreenerRow; value: string | boolean }
-  | { op: "notNull"; col: keyof ScreenerRow };
+  | { op: "eq"; col: keyof ScreenerRow; value: string | boolean };
 
 /**
  * The subset of `filters` that maps 1:1 onto stored columns, for pushing into the query so only
@@ -387,7 +366,6 @@ export function dbConditions(filters: Filters): DbCondition[] {
   if (filters.sector) out.push({ op: "eq", col: "sector", value: filters.sector });
   if (filters.type) out.push({ op: "eq", col: "type", value: filters.type });
   if (filters.sp500 === "1") out.push({ op: "eq", col: "in_sp500", value: true });
-  if (filters.has_put === "1") out.push({ op: "notNull", col: "put_contract" });
   return out;
 }
 
