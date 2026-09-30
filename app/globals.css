@@ -68,3 +68,22 @@ tr:hover td { background: var(--panel-2); }
 @media (min-width: 900px) { .chart { height: 520px; } }
 td.lvl, th.lvl { background: color-mix(in srgb, var(--accent) 6%, var(--panel)); }
 button.star { background: none; border: 0; padding: 0 2px; min-height: 0; color: var(--warn); font-size: 18px; line-height: 1; font-weight: 400; }
+
+/* Momentum tab: collapsible, labelled sections */
+.mnav { position: sticky; top: 0; z-index: 5; display: flex; gap: 6px; flex-wrap: wrap; padding: 8px 0; background: var(--bg); }
+.mnav a { display: inline-flex; align-items: center; gap: 6px; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 99px; padding: 4px 10px 4px 4px; font-size: 13px; }
+details.msec { margin: 10px 0; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); scroll-margin-top: 56px; }
+details.msec-sell[open] { border-color: color-mix(in srgb, var(--down) 45%, var(--line)); }
+details.msec-buy[open] { border-color: color-mix(in srgb, var(--up) 45%, var(--line)); }
+details.msec > summary { cursor: pointer; list-style: none; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px; font-size: 16px; }
+details.msec > summary::-webkit-details-marker { display: none; }
+details.msec > summary::before { content: "▸"; color: var(--muted); transition: transform .15s; }
+details.msec[open] > summary::before { transform: rotate(90deg); }
+.msec-hint { font-size: 12px; font-weight: 400; flex-basis: 100%; padding-left: 20px; }
+.msec-body { padding: 0 12px 12px; }
+.tag { display: inline-block; font-size: 11px; font-weight: 700; letter-spacing: .04em; padding: 2px 7px; border-radius: 6px; line-height: 1.5; white-space: nowrap; }
+.tag-sell { background: color-mix(in srgb, var(--down) 22%, transparent); color: var(--down); }
+.tag-buy { background: color-mix(in srgb, var(--up) 22%, transparent); color: var(--up); }
+.tag-hold { background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--accent); }
+.tag-watch { background: color-mix(in srgb, var(--warn) 22%, transparent); color: var(--warn); }
+.tag-info { background: var(--panel-2); color: var(--muted); }

@@ -63,117 +63,183 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
   if (!earnings.count) warnings.push("No earnings calendar uploaded: the earnings blackout rule will be skipped.");
   if (splits.count) warnings.push(`${splits.count} splits are waiting for their bars to be re-fetched; those tickers are excluded until then.`);
 
+  const sells = (sellRows ?? []) as SellTicket[];
+  const buys = (openTix ?? []) as Ticket[];
+  const alts = (altTix ?? []) as Ticket[];
+  const done = (doneTix ?? []) as Ticket[];
+  const rebalance = run?.kind === "weekly" || run?.kind === "monthly";
+  const altList = alts.length
+    ? alts.map((a) => ({ ticker: a.ticker, comp_rank: a.comp_rank ?? 0 }))
+    : (plan?.alternates ?? []).map((a) => ({ ticker: a.ticker, comp_rank: a.comp_rank }));
+  const watchCount = altList.length + (plan?.earningsWatch.length ?? 0) + (!rebalance ? plan?.buys.length ?? 0 : 0);
+  // One status per ticker so the ranking says what each name is to you.
+  const status = new Map<string, Status>();
+  for (const r of rows) if (r.entry_ok) status.set(r.ticker, "watch");
+  for (const a of altList) status.set(a.ticker, "alternate");
+  for (const l of lots) status.set(l.ticker, "held");
+  for (const b of buys) status.set(b.ticker, "buy");
+  for (const x of sells) status.set(x.ticker, "sell");
+
   return (
     <main>
       <div className="row spread">
         <h1>Momentum</h1>
         <span className="muted">{run ? `Signals ${run.signal_date} · ${run.kind} run` : "No run yet"}</span>
       </div>
-      <p className="muted">
-        Monthly momentum rotation: rank liquid large caps by 12-1 month momentum and closeness to the 52-week high, hold the top N
-        while SPY is above its 10-month average. Tax rules, buying-power changes and the journal reports come in the next build steps.
-      </p>
+
+      <nav className="mnav">
+        <a href="#sell"><span className="tag tag-sell">SELL</span> {sells.length}</a>
+        <a href="#buy"><span className="tag tag-buy">BUY</span> {buys.length}</a>
+        <a href="#hold"><span className="tag tag-hold">HOLD</span> {lots.length}</a>
+        <a href="#watch"><span className="tag tag-watch">WATCH</span> {watchCount}</a>
+        <a href="#info"><span className="tag tag-info">INFO</span></a>
+      </nav>
 
       {cfg.B < cfg.min_B_stock_version && (
         <div className="notice">B is below {money(cfg.min_B_stock_version, 0)}: stop the stock version and use a momentum ETF with the same regime filter.</div>
       )}
 
       <div className="grid" style={{ margin: "12px 0" }}>
-        <div className="stat"><div className="k">Buying power B</div><div className="v">{money(cfg.B, 0)}</div></div>
-        <div className="stat"><div className="k">Investable I</div><div className="v">{money(I, 0)}</div></div>
-        <div className="stat"><div className="k">Target positions N</div><div className="v">{N}</div></div>
-        <div className="stat"><div className="k">Equity E (risk cap)</div><div className="v">{money(cfg.E, 0)}</div></div>
         <div className="stat">
           <div className="k">Regime (SPY vs {cfg.regime_sma_months}-mo SMA)</div>
           <div className={`v ${regime?.riskOn ? "up" : regime?.riskOn === false ? "down" : ""}`}>
-            {regime?.riskOn == null ? "Unknown" : regime.riskOn ? "Risk-on" : "Risk-off"}
+            {regime?.riskOn == null ? "Unknown" : regime.riskOn ? "Risk-on: buys allowed" : "Risk-off: no buys"}
           </div>
         </div>
-        <div className="stat"><div className="k">Universe</div><div className="v">{funnel.at(-1)?.count ?? "—"}</div></div>
+        <div className="stat"><div className="k">Positions / target N</div><div className="v">{new Set(lots.map((l) => l.ticker)).size} / {N}</div></div>
+        <div className="stat"><div className="k">Buying power B · investable I</div><div className="v">{money(cfg.B, 0)} · {money(I, 0)}</div></div>
+        <div className="stat"><div className="k">Universe</div><div className="v">{funnel.at(-1)?.count ?? "—"} stocks</div></div>
       </div>
 
-      {regime && (
-        <p className="muted">
-          {regime.reason ?? `SPY month-end ${regime.monthEnd}: ${num(regime.close)} vs ${cfg.regime_sma_months}-month SMA ${num(regime.sma)}.`}
-          {" "}Month-end closes: {regime.months.map((m) => `${m.month} ${num(m.close)}`).join(" · ")}
-        </p>
+      <Section id="sell" tag="sell" title="Sell today" count={sells.length} open={sells.length > 0}
+        hint={sells.length ? "Exit orders to place at 9:45 ET, before any buys" : "Nothing to sell"}>
+        <ExitSection sells={sells} />
+      </Section>
+
+      <Section id="buy" tag="buy" title="Buy today" count={buys.length} open={buys.length > 0}
+        hint={buys.length ? "Buy orders to place after the sells fill" : "No buy orders. They appear the morning after a week- or month-end signal"}>
+        <TicketsSection open={buys} cfg={cfg} />
+      </Section>
+
+      <Section id="hold" tag="hold" title="Your positions" count={lots.length} open={lots.length > 0}
+        hint={lots.length ? "What you own, with today's stop and disaster stop" : "No positions yet"}>
+        <PositionsSection lots={lots} lastClose={lastClose} weekly={rebalance} />
+      </Section>
+
+      <div id="watch" />
+      <Section tag="watch" title="Alternates" count={altList.length} open={false}
+        hint="Backups: not orders. One becomes a buy only if a buy ticket is dropped">
+        {altList.length ? (
+          <ol>{altList.map((a) => <li key={a.ticker}><Link href={`/t/${a.ticker}`}><b>{a.ticker}</b></Link> <span className="muted">rank #{a.comp_rank}</span></li>)}</ol>
+        ) : <p className="muted">No alternates.</p>}
+      </Section>
+      <Section tag="watch" title="Earnings watch" count={plan?.earningsWatch.length ?? 0} open={false}
+        hint="Would qualify, but report earnings too soon: skipped this time, not orders">
+        {plan?.earningsWatch.length
+          ? <p>{plan.earningsWatch.map((a) => a.ticker).join(", ")}</p>
+          : <p className="muted">{earnings.count ? "None." : "No earnings calendar uploaded yet (see Info → Earnings calendar)."}</p>}
+      </Section>
+      {plan && !rebalance && (
+        <Section tag="watch" title="Next rebalance preview" count={plan.buys.length} open={false}
+          hint={`Not orders: what a rebalance on ${run?.signal_date}'s close would buy`}>
+          <PlanSection plan={plan} kind={run?.kind} signalDate={run?.signal_date} chase={cfg.chase_cap_pct} />
+        </Section>
       )}
 
-      {warnings.map((w) => <div key={w} className="notice">{w}</div>)}
-
-      <h2>Universe filters</h2>
-      <div className="table-wrap" style={{ marginBottom: 12 }}>
-        <table>
-          <thead><tr><th>Step</th><th>Remaining</th></tr></thead>
-          <tbody>{funnel.map((f, i) => <tr key={i}><td>{i + 1}. {f.step}</td><td>{f.count}</td></tr>)}</tbody>
-        </table>
-      </div>
-
-      <div className="row spread">
-        <h2>Ranking</h2>
-        <Link href={sp.all ? "/momentum" : "/momentum?all=1"} className="muted">{sp.all ? "Top 60" : "Show all"}</Link>
-      </div>
-      <p className="muted">
-        Entry: momentum percentile ≥ {cfg.entry_mom_pct}, H52 ≥ {cfg.entry_h52}, ≤ {cfg.entry_max_days_since_high} days since the high.
-        Hold: momentum percentile ≥ {cfg.hold_mom_pct}, H52 ≥ {cfg.hold_h52}, CompRank ≤ {cfg.hold_comprank_mult * N}.
-      </p>
-      <div className="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Rank</th><th>Ticker</th><th>Close</th><th>MOM</th><th>H52</th><th>Days since high</th><th>MOM pct</th><th>H52 pct</th>
-              <th>Composite</th><th>σ63</th><th>ATR20</th><th>Mkt cap</th><th>SIC</th><th>Entry</th><th>Hold</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r) => (
-              <tr key={r.ticker}>
-                <td>{r.comp_rank}</td>
-                <td><Link href={`/t/${r.ticker}`}><b>{r.ticker}</b></Link></td>
-                <td>{num(r.close)}</td>
-                <td>{pct(r.mom, 1, 100)}</td>
-                <td>{num(r.h52, 3)}</td>
-                <td>{r.days_since_high}</td>
-                <td>{num(r.mom_pct, 1)}</td>
-                <td>{num(r.h52_pct, 1)}</td>
-                <td className="score">{num(r.composite, 1)}</td>
-                <td>{pct(r.sigma63, 0, 100)}</td>
-                <td>{num(r.atr20)}</td>
-                <td>{big(r.market_cap)}</td>
-                <td>{r.sic2 ?? "—"}</td>
-                <td>{r.entry_ok ? <span className="up">✓</span> : <span className="muted">—</span>}</td>
-                <td>{r.hold_ok ? <span className="up">✓</span> : <span className="muted">—</span>}</td>
+      <div id="info" />
+      <Section tag="info" title="Ranking" count={rows.length} open={false} hint="Every stock in the universe, best first, with what it is to you">
+        <p className="muted">
+          Entry test: momentum percentile ≥ {cfg.entry_mom_pct}, H52 ≥ {cfg.entry_h52}, ≤ {cfg.entry_max_days_since_high} days since the high.
+          Hold test: momentum percentile ≥ {cfg.hold_mom_pct}, H52 ≥ {cfg.hold_h52}, CompRank ≤ {cfg.hold_comprank_mult * N}.
+          {" "}<Link href={sp.all ? "/momentum" : "/momentum?all=1"}>{sp.all ? "Show top 60" : "Show all"}</Link>
+        </p>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Rank</th><th>Ticker</th><th>Status</th><th>Close</th><th>MOM</th><th>H52</th><th>Days since high</th><th>MOM pct</th><th>H52 pct</th>
+                <th>Composite</th><th>σ63</th><th>ATR20</th><th>Mkt cap</th><th>SIC</th><th>Entry</th><th>Hold</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.ticker}>
+                  <td>{r.comp_rank}</td>
+                  <td><Link href={`/t/${r.ticker}`}><b>{r.ticker}</b></Link></td>
+                  <td style={{ textAlign: "left" }}><StatusTag s={status.get(r.ticker)} /></td>
+                  <td>{num(r.close)}</td>
+                  <td>{pct(r.mom, 1, 100)}</td>
+                  <td>{num(r.h52, 3)}</td>
+                  <td>{r.days_since_high}</td>
+                  <td>{num(r.mom_pct, 1)}</td>
+                  <td>{num(r.h52_pct, 1)}</td>
+                  <td className="score">{num(r.composite, 1)}</td>
+                  <td>{pct(r.sigma63, 0, 100)}</td>
+                  <td>{num(r.atr20)}</td>
+                  <td>{big(r.market_cap)}</td>
+                  <td>{r.sic2 ?? "—"}</td>
+                  <td>{r.entry_ok ? <span className="up">✓</span> : <span className="muted">—</span>}</td>
+                  <td>{r.hold_ok ? <span className="up">✓</span> : <span className="muted">—</span>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Section>
 
-      <ExitSection sells={(sellRows ?? []) as SellTicket[]} />
-      <PositionsSection lots={lots} lastClose={lastClose} weekly={run?.kind === "weekly" || run?.kind === "monthly"} />
+      {plan && rebalance && (
+        <Section tag="info" title="Buy list sizing" count={plan.buys.length} open={false} hint={`How today's buy orders were sized from the ${run?.kind} signal`}>
+          <PlanSection plan={plan} kind={run?.kind} signalDate={run?.signal_date} chase={cfg.chase_cap_pct} />
+        </Section>
+      )}
 
-      <TicketsSection open={(openTix ?? []) as Ticket[]} alternates={(altTix ?? []) as Ticket[]} done={(doneTix ?? []) as Ticket[]} cfg={cfg} />
+      <Section tag="info" title="Regime & notices" count={warnings.length} open={false} hint="SPY month-end closes and data warnings">
+        {regime && (
+          <p>
+            {regime.reason ?? `SPY month-end ${regime.monthEnd}: ${num(regime.close)} vs ${cfg.regime_sma_months}-month SMA ${num(regime.sma)}.`}
+            <br /><span className="muted">Month-end closes: {regime.months.map((m) => `${m.month} ${num(m.close)}`).join(" · ")}</span>
+          </p>
+        )}
+        {warnings.map((w) => <div key={w} className="notice">{w}</div>)}
+        <p className="muted">
+          Monthly momentum rotation: rank liquid large caps by 12-1 month momentum and closeness to the 52-week high, hold the top N
+          while SPY is above its 10-month average. Equity E (risk cap) {money(cfg.E, 0)}.
+        </p>
+      </Section>
 
-      {plan && <PlanSection plan={plan} kind={run?.kind} signalDate={run?.signal_date} chase={cfg.chase_cap_pct} />}
+      <Section tag="info" title="Universe filters" count={funnel.at(-1)?.count ?? 0} open={false} hint="How many stocks pass each filter">
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>Step</th><th>Remaining</th></tr></thead>
+            <tbody>{funnel.map((f, i) => <tr key={i}><td>{i + 1}. {f.step}</td><td>{f.count}</td></tr>)}</tbody>
+          </table>
+        </div>
+      </Section>
 
-      <h2>Data flags ({blocking.length} blocking, {review.length} to review)</h2>
-      <p className="muted">
-        Blocking flags keep a stock out of signals until you clear them. Big moves are often real news (earnings, trial results):
-        check the chart and clear the ones that aren&apos;t data errors. News sweep: {news.count ?? 0} of the last 90 days scanned.
-      </p>
-      <FlagTable flags={[...blocking, ...review]} />
+      <Section tag="info" title="Data flags" count={blocking.length + review.length} open={false}
+        hint={`${blocking.length} blocking, ${review.length} to review`}>
+        <p className="muted">
+          Blocking flags keep a stock out of signals until you clear them. Big moves are often real news (earnings, trial results):
+          check the chart and clear the ones that aren&apos;t data errors. News sweep: {news.count ?? 0} of the last 90 days scanned.
+        </p>
+        <FlagTable flags={[...blocking, ...review]} />
+      </Section>
 
-      <details className="panel" style={{ marginTop: 12 }}>
-        <summary>Earnings calendar ({earnings.count ?? 0} dates)</summary>
+      <Section tag="info" title="Order history" count={done.length} open={false} hint="Recently filled, dropped or cancelled buy tickets">
+        {done.length
+          ? <ul>{done.map((t) => <li key={t.id}>{t.ticker} · {t.status} · {t.signal_date} {t.kind}{t.note ? ` · ${t.note}` : ""}</li>)}</ul>
+          : <p className="muted">None yet.</p>}
+      </Section>
+
+      <Section tag="info" title="Earnings calendar" count={earnings.count ?? 0} open={false} hint="Upload your broker's earnings CSV">
         <p className="muted">Upload a CSV from your broker with a ticker (or symbol) column and a report date column. It replaces the current calendar.</p>
         <form action={uploadEarnings} className="row">
           <input type="file" name="file" accept=".csv,text/csv" />
           <button type="submit">Upload</button>
         </form>
-      </details>
+      </Section>
 
-      <details className="panel" style={{ marginTop: 12 }}>
-        <summary>Strategy settings</summary>
+      <Section tag="info" title="Strategy settings" open={false} hint="Buying power, limits and every rule parameter">
         <form action={saveMomConfig}>
           {[...new Set(MOM_FIELDS.map((f) => f.group))].map((g) => (
             <fieldset key={g} style={{ border: 0, padding: 0, margin: "10px 0" }}>
@@ -193,9 +259,38 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
           ))}
           <button type="submit">Save settings</button>
         </form>
-      </details>
+      </Section>
     </main>
   );
+}
+
+type Tag = "sell" | "buy" | "hold" | "watch" | "info";
+const TAG_TEXT: Record<Tag, string> = { sell: "SELL", buy: "BUY", hold: "HOLD", watch: "WATCH", info: "INFO" };
+
+function Section({ id, tag, title, count, hint, open, children }: {
+  id?: string; tag: Tag; title: string; count?: number; hint?: string; open: boolean; children: React.ReactNode;
+}) {
+  return (
+    <details id={id} className={`msec msec-${tag}`} open={open}>
+      <summary>
+        <span className={`tag tag-${tag}`}>{TAG_TEXT[tag]}</span>
+        <b>{title}</b>
+        {count != null && <span className="pill">{count}</span>}
+        {hint && <span className="muted msec-hint">{hint}</span>}
+      </summary>
+      <div className="msec-body">{children}</div>
+    </details>
+  );
+}
+
+type Status = "sell" | "buy" | "held" | "alternate" | "watch";
+function StatusTag({ s }: { s?: Status }) {
+  if (!s) return <span className="muted">—</span>;
+  const m: Record<Status, [Tag, string]> = {
+    sell: ["sell", "SELLING"], buy: ["buy", "BUY TODAY"], held: ["hold", "HELD"], alternate: ["watch", "ALTERNATE"], watch: ["watch", "WATCH"],
+  };
+  const [t, label] = m[s];
+  return <span className={`tag tag-${t}`}>{label}</span>;
 }
 
 function FlagTable({ flags }: { flags: Flag[] }) {
@@ -244,11 +339,10 @@ function PlanSection({ plan, kind, signalDate, chase }: { plan: Plan; kind?: str
   const total = plan.buys.reduce((a, b) => a + b.amount, 0);
   return (
     <>
-      <h2>Planned buys</h2>
       <p className="muted">
         {kind === "monthly" || kind === "weekly"
-          ? `Buy list from the ${kind} signals of ${signalDate}.`
-          : `Preview only: ${signalDate} isn't a rebalance date, so this shows what a rebalance on its close would buy.`}
+          ? `Buy list from the ${kind} signals of ${signalDate}; these are already the orders under Buy today.`
+          : `Not orders. ${signalDate} isn't a rebalance date, so nothing is bought; this is what a rebalance on its close would buy.`}
         {" "}Sized at the chase cap (S × {num(1 + chase, 2)}), the most a ticket may pay; the 9:45 ticket recomputes shares at the real limit.
         {" "}{plan.buys.length} of {plan.openSlots} open slots · {money(total, 0)} of {money(plan.I, 0)} investable.
       </p>
@@ -281,12 +375,6 @@ function PlanSection({ plan, kind, signalDate, chase }: { plan: Plan; kind?: str
           </table>
         </div>
       )}
-      {plan.alternates.length > 0 && (
-        <p><b>Alternates:</b> {plan.alternates.map((a) => `${a.ticker} (#${a.comp_rank})`).join(", ")}</p>
-      )}
-      {plan.earningsWatch.length > 0 && (
-        <p><b>Earnings watch (skipped this time):</b> {plan.earningsWatch.map((a) => a.ticker).join(", ")}</p>
-      )}
       {plan.skipped.length > 0 && (
         <details className="panel">
           <summary>Skipped ({plan.skipped.length})</summary>
@@ -297,19 +385,19 @@ function PlanSection({ plan, kind, signalDate, chase }: { plan: Plan; kind?: str
   );
 }
 
-function TicketsSection({ open, alternates, done, cfg }: { open: Ticket[]; alternates: Ticket[]; done: Ticket[]; cfg: Awaited<ReturnType<typeof getMomConfig>> }) {
+function TicketsSection({ open, cfg }: { open: Ticket[]; cfg: Awaited<ReturnType<typeof getMomConfig>> }) {
   const tradeDay = open[0]?.trade_date;
   const chrome =
     `At 9:45 AM ET, open my brokerage account and look up the current bid and ask for these tickers: ${open.map((t) => t.ticker).join(", ")}. ` +
-    `Then open the Momentum tab of my stock screener, find the "Tickets" table and, for each ticker, type the bid into its Bid box and the ask into its Ask box ` +
+    `Then open the Momentum tab of my stock screener, find the "Buy today" section and, for each ticker, type the bid into its Bid box and the ask into its Ask box ` +
     `(the boxes are labelled "<TICKER> bid" and "<TICKER> ask"). Click "Calculate limits" and read me back each ticker's LP1, LP2 and shares. Do not place any orders.`;
   return (
     <>
-      <h2>Tickets{tradeDay ? ` for ${tradeDay}` : ""}</h2>
       {!open.length ? (
-        <p className="muted">No open buy tickets. They are created the morning after a week-end or month-end signal (6:15am ET) while the regime is risk-on and slots are free.</p>
+        <p className="muted">No buy orders today. They are created the morning after a week-end or month-end signal (6:15am ET) while the regime is risk-on and slots are free.</p>
       ) : (
         <>
+          <p><b>Buy orders for {tradeDay}</b></p>
           <ol className="muted" style={{ paddingLeft: 18 }}>
             <li>Sells first at 9:45 ET; place buys after the sells fill.</li>
             <li>At 9:45 enter each bid and ask below and press Calculate limits.</li>
@@ -327,7 +415,7 @@ function TicketsSection({ open, alternates, done, cfg }: { open: Ticket[]; alter
                 <tbody>
                   {open.map((t) => (
                     <tr key={t.id}>
-                      <td><Link href={`/t/${t.ticker}`}><b>{t.ticker}</b></Link><input type="hidden" name="id" value={t.id} /></td>
+                      <td><span className="tag tag-buy">BUY</span> <Link href={`/t/${t.ticker}`}><b>{t.ticker}</b></Link><input type="hidden" name="id" value={t.id} /></td>
                       <td>{t.comp_rank}</td>
                       <td>{t.retry_day}/{cfg.entry_max_retry_days}</td>
                       <td>{num(t.s_close)}</td>
@@ -348,11 +436,11 @@ function TicketsSection({ open, alternates, done, cfg }: { open: Ticket[]; alter
             <button type="submit" style={{ marginTop: 8 }}>Calculate limits</button>
           </form>
 
-          <h3>Record fills</h3>
+          <h3>Record fills (after your broker fills the buy)</h3>
           <div className="card-list">
             {open.map((t) => (
               <div key={t.id} className="row panel">
-                <b style={{ minWidth: 60 }}>{t.ticker}</b>
+                <span className="tag tag-buy">BUY</span><b style={{ minWidth: 60 }}>{t.ticker}</b>
                 <form action={fillTicket} className="row">
                   <input type="hidden" name="id" value={t.id} />
                   <label>Avg fill F<input name="price" inputMode="decimal" style={{ width: 90 }} /></label>
@@ -374,15 +462,6 @@ function TicketsSection({ open, alternates, done, cfg }: { open: Ticket[]; alter
           </details>
         </>
       )}
-      {alternates.length > 0 && (
-        <p><b>Alternates:</b> {alternates.map((a) => `${a.ticker} (#${a.comp_rank})`).join(", ")}</p>
-      )}
-      {done.length > 0 && (
-        <details className="panel" style={{ marginTop: 12 }}>
-          <summary>Recent tickets ({done.length})</summary>
-          <ul>{done.map((t) => <li key={t.id}>{t.ticker} · {t.status} · {t.signal_date} {t.kind}{t.note ? ` · ${t.note}` : ""}</li>)}</ul>
-        </details>
-      )}
     </>
   );
 }
@@ -397,14 +476,14 @@ type SellTicket = {
 };
 
 function ExitSection({ sells }: { sells: SellTicket[] }) {
-  if (!sells.length) return null;
+  if (!sells.length) return <p className="muted">Nothing to sell today. Every position stays above its stop.</p>;
   const chrome =
     `At 9:45 AM ET, open my brokerage account and look up the current bid and ask for: ${sells.map((t) => t.ticker).join(", ")}. ` +
-    `Then open the Momentum tab of my stock screener, find the "Exit tickets" table, type each bid and ask into the boxes labelled "<TICKER> exit bid" / "<TICKER> exit ask", ` +
+    `Then open the Momentum tab of my stock screener, find the "Sell today" section, type each bid and ask into the boxes labelled "<TICKER> exit bid" / "<TICKER> exit ask", ` +
     `click "Calculate exit limits" and read me back XP1 and XP2 for each. Do not place any orders.`;
   return (
     <>
-      <h2>Exit tickets for {sells[0].trade_date}</h2>
+      <p><b>Sell orders for {sells[0].trade_date}</b></p>
       <p className="muted">
         Sells go first at 9:45 ET: limit at XP1; after 10 minutes move to XP2 (the bid); after another 20 minutes sell at market.
         Stop, regime, acquisition and halt exits must be out the same session, even if the stock gaps below the stop.
@@ -416,7 +495,7 @@ function ExitSection({ sells }: { sells: SellTicket[] }) {
             <tbody>
               {sells.map((t) => (
                 <tr key={t.id}>
-                  <td><Link href={`/t/${t.ticker}`}><b>{t.ticker}</b></Link><input type="hidden" name="id" value={t.id} /></td>
+                  <td><span className="tag tag-sell">SELL</span> <Link href={`/t/${t.ticker}`}><b>{t.ticker}</b></Link><input type="hidden" name="id" value={t.id} /></td>
                   <td className={t.urgent ? "down" : ""}>{t.exit_trigger}. {TRIGGER_LABEL[t.exit_trigger]}</td>
                   <td>{t.shares_to_sell}</td>
                   <td>{t.urgent && t.exit_trigger !== 4 ? "Same day" : t.deadline}</td>
@@ -432,11 +511,11 @@ function ExitSection({ sells }: { sells: SellTicket[] }) {
         </div>
         <button type="submit" style={{ marginTop: 8 }}>Calculate exit limits</button>
       </form>
-      <h3>Record exits</h3>
+      <h3>Record exits (after your broker fills the sell)</h3>
       <div className="card-list">
         {sells.map((t) => (
           <form key={t.id} action={exitTicket} className="row panel">
-            <b style={{ minWidth: 60 }}>{t.ticker}</b>
+            <span className="tag tag-sell">SELL</span><b style={{ minWidth: 60 }}>{t.ticker}</b>
             <input type="hidden" name="id" value={t.id} />
             <label>Avg exit X<input name="price" inputMode="decimal" style={{ width: 90 }} /></label>
             <label>Fees $<input name="fees" inputMode="decimal" defaultValue="0" style={{ width: 70 }} /></label>
@@ -454,11 +533,10 @@ function ExitSection({ sells }: { sells: SellTicket[] }) {
 }
 
 function PositionsSection({ lots, lastClose, weekly }: { lots: LotView[]; lastClose: Map<string, number>; weekly: boolean }) {
-  if (!lots.length) return null;
+  if (!lots.length) return <p className="muted">No positions yet. Recorded buy fills show up here with their stops.</p>;
   const stale = lots.filter((l) => l.disaster_posted == null || Math.abs(l.disaster_posted - l.disaster_stop) > 0.004);
   return (
     <>
-      <h2>Positions ({lots.length} lots)</h2>
       {weekly && stale.length > 0 && (
         <div className="notice">
           Friday disaster-stop update: move the broker GTC stop-market orders for {stale.map((l) => `${l.ticker} → ${num(l.disaster_stop)}`).join(", ")}.
@@ -475,7 +553,7 @@ function PositionsSection({ lots, lastClose, weekly }: { lots: LotView[]; lastCl
               const pnl = c != null ? (c - l.fill_price) * l.shares : null;
               return (
                 <tr key={l.id}>
-                  <td><Link href={`/t/${l.ticker}`}><b>{l.ticker}</b></Link></td>
+                  <td><span className="tag tag-hold">HOLD</span> <Link href={`/t/${l.ticker}`}><b>{l.ticker}</b></Link></td>
                   <td>{l.filled_at.slice(0, 10)}</td>
                   <td>{l.shares}</td>
                   <td>{num(l.fill_price)}</td>
