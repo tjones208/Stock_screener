@@ -90,6 +90,10 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
   const sells = (sellRows ?? []) as SellTicket[];
   const buys = (openTix ?? []) as Ticket[];
   const alts = (altTix ?? []) as Ticket[];
+  // Buy safety (lib/momentum/quality.ts): the latest run's data-quality gate and earnings check.
+  const quality = run?.quality as { gate_ok?: boolean; gate_reasons?: string[]; compared_to?: string | null; earnings_ok?: boolean; earnings_reason?: string | null } | null;
+  const uncheckedBuys = buys.filter((t) => t.earnings_unchecked);
+  const earningsUnchecked = uncheckedBuys.length > 0 || quality?.earnings_ok === false;
   const done = (doneTix ?? []) as Ticket[];
   const rebalance = run?.kind === "weekly" || run?.kind === "monthly";
   const altList = alts.length
@@ -119,6 +123,20 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
         <a href="#watch"><span className="tag tag-watch">WATCH</span> {watchCount}</a>
         <a href="#info"><span className="tag tag-info">INFO</span></a>
       </nav>
+
+      {quality?.gate_ok === false && (
+        <div className="notice notice-danger">
+          <b>New buys blocked for {run?.signal_date}.</b> The data-quality gate failed, so no new buy tickets, promotions or top-ups
+          were created; stops, exits and open tickets still run. {(quality.gate_reasons ?? []).join(" · ")}
+        </div>
+      )}
+      {earningsUnchecked && (
+        <div className="notice notice-danger">
+          <b>Earnings unchecked.</b> {quality?.earnings_reason ?? "The earnings calendar was unavailable when these tickets were made."}{" "}
+          {uncheckedBuys.length ? `${uncheckedBuys.length} open buy ticket${uncheckedBuys.length === 1 ? " wasn't" : "s weren't"} screened` : "New buy tickets won't be screened"} for
+          earnings in the next {cfg.earnings_blackout_days} trading days. Check each name&apos;s report date before buying.
+        </div>
+      )}
 
       {cfg.B < cfg.min_B_stock_version && (
         <div className="notice">B is below {money(cfg.min_B_stock_version, 0)}: stop the stock version and use a momentum ETF with the same regime filter.</div>
@@ -481,7 +499,8 @@ function TicketsSection({ open, cfg }: { open: Ticket[]; cfg: Awaited<ReturnType
                 <tbody>
                   {open.map((t) => (
                     <tr key={t.id}>
-                      <td><span className="tag tag-buy">BUY</span> <Link href={`/t/${t.ticker}`}><b>{t.ticker}</b></Link><input type="hidden" name="id" value={t.id} /> <AddLink ticker={t.ticker} /></td>
+                      <td><span className="tag tag-buy">BUY</span> <Link href={`/t/${t.ticker}`}><b>{t.ticker}</b></Link><input type="hidden" name="id" value={t.id} /> <AddLink ticker={t.ticker} />
+                        {t.earnings_unchecked && <span className="tag tag-sell" title="Not screened for earnings: check the report date before buying" style={{ marginLeft: 4 }}>EARNINGS UNCHECKED</span>}</td>
                       <td>{t.comp_rank}</td>
                       <td>{t.retry_day}/{cfg.entry_max_retry_days}</td>
                       <td>{num(t.s_close)}</td>
@@ -507,6 +526,7 @@ function TicketsSection({ open, cfg }: { open: Ticket[]; cfg: Awaited<ReturnType
             {open.map((t) => (
               <div key={t.id} className="row panel">
                 <span className="tag tag-buy">BUY</span><b style={{ minWidth: 60 }}>{t.ticker}</b>
+                {t.earnings_unchecked && <span className="tag tag-sell">EARNINGS UNCHECKED</span>}
                 <form action={fillTicket} className="row">
                   <input type="hidden" name="id" value={t.id} />
                   <label>Avg fill F<input name="price" inputMode="decimal" style={{ width: 90 }} /></label>

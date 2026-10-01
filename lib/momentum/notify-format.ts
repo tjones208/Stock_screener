@@ -5,7 +5,19 @@ export type SellLine = { ticker: string; shares_to_sell: number; exit_trigger: n
 
 export type AssignLine = { ticker: string; contracts: number; strike: number };
 
-export function formatSellPush(today: string, sells: SellLine[], openLots: number, assigned: AssignLine[] = []) {
+/** "⚠ Earnings unchecked" line for the morning push, or null when every buy order today was screened. */
+export function earningsWarning(uncheckedBuys: number): string | null {
+  if (!uncheckedBuys) return null;
+  return `⚠ Earnings unchecked: ${uncheckedBuys} buy order${uncheckedBuys === 1 ? "" : "s"} today ${uncheckedBuys === 1 ? "wasn't" : "weren't"} screened for earnings — check each before buying`;
+}
+
+/** Warning lines (earnings unchecked, new buys blocked) lead the body so they show in the notification preview. */
+export function formatSellPush(today: string, sells: SellLine[], openLots: number, assigned: AssignLine[] = [], warnings: string[] = []) {
+  const m = formatSells(today, sells, openLots, assigned);
+  return warnings.length ? { title: m.title, body: [...warnings, m.body].join("\n") } : m;
+}
+
+function formatSells(today: string, sells: SellLine[], openLots: number, assigned: AssignLine[]) {
   const day = new Date(today + "T12:00:00Z").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "UTC" });
   const called = assigned.map((a) => `CALLED AWAY? ${a.ticker} ${a.contracts * 100} sh at ${a.strike}: confirm on the Momentum tab`);
   if (!sells.length && called.length) {

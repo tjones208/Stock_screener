@@ -46,7 +46,8 @@ export async function updateStops(t: string, cfg: MomConfig) {
  * Exit review for signal date t (triggers 1–5 and 7; 6 is the buying-power command), plus month-end
  * top-ups. Creates sell tickets for the next session; a ticker that already has an open sell ticket is skipped.
  */
-export async function exitReview(t: string, monthEnd: boolean, riskOn: boolean | null, cfg: MomConfig, tradeDay: string, cal: Calendar) {
+export async function exitReview(t: string, monthEnd: boolean, riskOn: boolean | null, cfg: MomConfig, tradeDay: string, cal: Calendar,
+  opts: { allowTopups?: boolean; earningsUnchecked?: boolean } = {}) {
   const lots = await openLots();
   if (!lots.length) return { positions: 0, exits: 0, topups: 0 };
   const tickers = [...new Set(lots.map((l) => l.ticker))];
@@ -95,7 +96,7 @@ export async function exitReview(t: string, monthEnd: boolean, riskOn: boolean |
       }, { onConflict: "signal_date,kind,side,ticker" });
       if (error) throw new Error(`exit ticket: ${error.message}`);
       exits++;
-    } else if (!order && monthEnd && riskOn === true) {
+    } else if (!order && monthEnd && riskOn === true && (opts.allowTopups ?? true)) {
       const add = topUpShares(p, cfg);
       const sn = s.get(tick);
       if (add > 0 && sn && p.close != null) {
@@ -103,6 +104,7 @@ export async function exitReview(t: string, monthEnd: boolean, riskOn: boolean |
           signal_date: t, kind: "topup", side: "buy", ticker: tick, status: "open", comp_rank: sn.comp_rank, sector: sectors.get(tick)!,
           sigma63: sn.sigma63, atr20: sn.atr20, t_target: add * p.close, s_close: p.close, cap: entryCap(p.close, cfg),
           planned_shares: add, trade_date: tradeDay, note: `Top-up: under ${cfg.topup_below_mult}× its target ${targets.get(tick)?.toFixed(0)}`,
+          earnings_unchecked: !!opts.earningsUnchecked,
         }, { onConflict: "signal_date,kind,side,ticker" });
         topups++;
       }

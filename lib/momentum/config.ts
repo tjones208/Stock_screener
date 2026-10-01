@@ -37,7 +37,7 @@ export const MOM_DEFAULTS = {
   trim_trigger_mult: 2.0,
   trim_to_mult: 1.5,
   topup_below_mult: 0.5,
-  earnings_blackout_days: 2,
+  earnings_blackout_days: 5,
   lt_tax_window_days: 30, // calendar days
   wash_sale_block_days: 31, // calendar days
   alternates: 5,
@@ -52,6 +52,10 @@ export const MOM_DEFAULTS = {
   call_delta_min: 0.15,
   call_delta_max: 0.2,
   call_min_dte: 5,
+  // Data-quality gate (not in the original spec): no new buys when the data looks incomplete.
+  gate_max_universe_change_pct: 0.25, // vs the previous run (when both passed the market-cap check)
+  gate_max_missing_market_caps: 50,   // liquid names with no market cap loaded
+  gate_min_news_days: 85,             // of the last 90 calendar days covered by the news sweep
 };
 
 export type MomConfig = typeof MOM_DEFAULTS;
@@ -102,6 +106,9 @@ export const MOM_FIELDS: { key: MomKey; label: string; group: string }[] = [
   { key: "lt_tax_window_days", label: "Long-term tax window (calendar days)", group: "Tax" },
   { key: "wash_sale_block_days", label: "Wash-sale block (calendar days)", group: "Tax" },
   { key: "min_B_stock_version", label: "Min B for the stock version ($)", group: "Account" },
+  { key: "gate_max_universe_change_pct", label: "Block buys if universe changes more than (fraction)", group: "Data-quality gate" },
+  { key: "gate_max_missing_market_caps", label: "Block buys if liquid names missing a market cap exceed", group: "Data-quality gate" },
+  { key: "gate_min_news_days", label: "Block buys if news sweep covers fewer than (of 90 days)", group: "Data-quality gate" },
   { key: "covered_calls", label: "Show covered-call section", group: "Covered calls" },
   { key: "call_delta_min", label: "Suggested call delta min", group: "Covered calls" },
   { key: "call_delta_max", label: "Suggested call delta max", group: "Covered calls" },

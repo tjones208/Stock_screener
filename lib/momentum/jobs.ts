@@ -10,6 +10,8 @@ import { advanceTickets, createTickets } from "./tickets";
 import { exitReview, updateStops } from "./positions";
 import { refreshCallIdeas, settleExpiredCalls } from "./covered";
 import { tickerSectors } from "./sector-db";
+import { dataGate, passedMcapCheck, type RunQuality } from "./quality";
+import { earningsStatus } from "../earnings-sync";
 import { regimeAt, type Regime } from "./regime";
 import { buyoutHits } from "./news";
 
@@ -139,19 +141,51 @@ export async function momentumBuild(t?: string) {
   if (error) throw new Error(`ss_mom_build: ${error.message}`);
   const sectors = await storeSnapshotSectors(latest);
   const regime: Regime = regimeAt(await spyBars(latest), latest, cal, cfg.regime_sma_months);
-  await db().from("ss_mom_runs").update({ regime }).eq("signal_date", latest).eq("kind", kind);
+  // Buy safety: data-quality gate (no new buy tickets) and earnings check (tickets flagged).
+  const built = data as { funnel: { count: number }[]; warnings: string[] };
+  const { gate, quality, earnings } = await buySafety(latest, built, cfg);
+  const warnings = [
+    ...(built.warnings ?? []),
+    ...gate.reasons.map((r) => `New buys blocked: ${r}`),
+    ...(earnings.ok ? [] : [`Earnings unchecked: ${earnings.reason} Buy tickets are created but not screened for earnings in the next ${cfg.earnings_blackout_days} trading days.`]),
+  ];
+  await db().from("ss_mom_runs").update({ regime, quality, warnings }).eq("signal_date", latest).eq("kind", kind);
   // Tickets work the next session: roll unfilled ones forward first, then add this plan's buys.
   // Weekly refills use the regime as of the last month-end (it isn't re-checked weekly).
   // Order: stops on today's close → exit review (sells first) → roll open buys → new buys for freed slots.
   const tradeDay = nextTradingDay(cal, latest);
   const stops = await updateStops(latest, cfg);
   const calls = await settleExpiredCalls(latest);
-  const exits = await exitReview(latest, kind === "monthly", regime.riskOn, cfg, tradeDay, cal);
-  const advanced = await advanceTickets(latest, tradeDay, cfg, cal);
-  const tickets = kind === "daily" ? null : await createTickets(latest, kind, cfg, regime.riskOn, tradeDay, cal);
+  const unchecked = !earnings.ok;
+  const exits = await exitReview(latest, kind === "monthly", regime.riskOn, cfg, tradeDay, cal, { allowTopups: gate.ok, earningsUnchecked: unchecked });
+  const advanced = await advanceTickets(latest, tradeDay, cfg, cal, { allowNewBuys: gate.ok, earningsUnchecked: unchecked });
+  const tickets = kind === "daily" ? null
+    : !gate.ok ? { created: 0, blocked: gate.reasons }
+    : await createTickets(latest, kind, cfg, regime.riskOn, tradeDay, cal, { earningsUnchecked: unchecked });
   // Covered-call suggestions for the session (after exits, so positions being sold are skipped).
   const callIdeas = await refreshCallIdeas(tradeDay, cfg, cal).catch((e) => ({ error: String(e) }));
-  return { signalDate: latest, kind, N, tradeDay, regime: { riskOn: regime.riskOn, close: regime.close, sma: regime.sma }, stops, calls, exits, advanced, tickets, callIdeas, sectors, ...(data as object) };
+  return { signalDate: latest, kind, N, tradeDay, regime: { riskOn: regime.riskOn, close: regime.close, sma: regime.sma }, stops, calls, exits, advanced, tickets, callIdeas, sectors, ...(data as object), warnings, quality };
+}
+
+/**
+ * Data-quality inputs for this run, the gate against the previous run that passed the market-cap
+ * check (see quality.dataGate), and whether the earnings calendar is usable.
+ */
+async function buySafety(t: string, built: { funnel: { count: number }[] }, cfg: MomConfig) {
+  const [{ data: q, error }, { data: prevRows }, earnings] = await Promise.all([
+    db().rpc("ss_mom_quality", { p_t: t, p_min_price: cfg.min_price, p_min_dv: cfg.min_median_dollar_vol_60d }),
+    db().from("ss_mom_runs").select("signal_date, quality").lt("signal_date", t).not("quality", "is", null)
+      .order("signal_date", { ascending: false }).order("created_at", { ascending: false }).limit(10),
+    earningsStatus(),
+  ]);
+  if (error) throw new Error(`ss_mom_quality: ${error.message}`);
+  const cur: RunQuality = { universe: built.funnel?.at(-1)?.count ?? 0, no_mcap: (q as RunQuality).no_mcap, news_days: (q as RunQuality).news_days };
+  // Baseline = the most recent earlier run that passed the market-cap check.
+  const prev = ((prevRows ?? []) as { signal_date: string; quality: RunQuality }[]).find((r) => passedMcapCheck(r.quality, cfg)) ?? null;
+  const gate = dataGate(cur, prev, cfg);
+  const quality = { ...cur, gate_ok: gate.ok, gate_reasons: gate.reasons, compared_to: gate.comparedTo,
+    earnings_ok: earnings.ok, earnings_reason: earnings.reason, earnings_future_rows: earnings.futureRows };
+  return { gate, quality, earnings };
 }
 
 /** Record the GICS sector bucket (momSector) on each snapshot row of signal date t; sic2 stays for reference. */

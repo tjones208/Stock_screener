@@ -15,6 +15,8 @@ export type Ticket = {
   s_close: number; cap: number; planned_shares: number | null; trade_date: string | null; retry_day: number;
   bid: number | null; ask: number | null; lp1: number | null; lp2: number | null; shares_lp1: number | null; shares_lp2: number | null;
   risk_cap_shares: number | null; quoted_at: string | null; note: string | null;
+  /** Created while the earnings calendar was unavailable: the blackout wasn't applied. */
+  earnings_unchecked?: boolean;
 };
 
 type SnapRow = Candidate & { mom_pct: number; h52: number; days_since_high: number };
@@ -72,7 +74,8 @@ async function earningsWithin(cal: Calendar, t: string, cfg: MomConfig): Promise
 }
 
 /** Tickets for a weekly refill or monthly rebalance. Idempotent per (signal date, kind). */
-export async function createTickets(t: string, kind: "weekly" | "monthly", cfg: MomConfig, riskOn: boolean | null, tradeDay: string, cal: Calendar) {
+export async function createTickets(t: string, kind: "weekly" | "monthly", cfg: MomConfig, riskOn: boolean | null, tradeDay: string, cal: Calendar,
+  opts: { earningsUnchecked?: boolean } = {}) {
   if (riskOn !== true) {
     // Regime exit: no buys or refills; open buy tickets are cancelled.
     const { data } = await db().from("ss_mom_tickets").update({ status: "cancelled", note: "Regime not risk-on", updated_at: new Date().toISOString() })
@@ -96,7 +99,11 @@ export async function createTickets(t: string, kind: "weekly" | "monthly", cfg: 
     })),
   ].map((r) => {
     const s = byTicker.get(r.ticker);
-    return { ...r, signal_date: t, kind, side: "buy", mom_pct: s?.mom_pct ?? null, h52: s?.h52 ?? null, days_since_high: s?.days_since_high ?? null };
+    return {
+      ...r, signal_date: t, kind, side: "buy", mom_pct: s?.mom_pct ?? null, h52: s?.h52 ?? null, days_since_high: s?.days_since_high ?? null,
+      // No usable earnings calendar: the blackout couldn't be applied, so check each name by hand.
+      earnings_unchecked: !!opts.earningsUnchecked,
+    };
   });
   if (rows.length) {
     const { error } = await db().from("ss_mom_tickets").insert(rows);
@@ -109,7 +116,8 @@ export async function createTickets(t: string, kind: "weekly" | "monthly", cfg: 
  * Give a dropped ticket's slot to the next name: re-plan the same signal date without the dropped
  * names, keep this plan's live tickets, and open the first new name (normally the next alternate).
  */
-export async function promoteAlternate(plan: { signal_date: string; kind: string }, tradeDay: string, cfg: MomConfig, cal: Calendar) {
+export async function promoteAlternate(plan: { signal_date: string; kind: string }, tradeDay: string, cfg: MomConfig, cal: Calendar,
+  opts: { earningsUnchecked?: boolean } = {}) {
   const { data: mine } = await db().from("ss_mom_tickets").select("id, ticker, status").eq("signal_date", plan.signal_date).eq("kind", plan.kind).eq("side", "buy");
   const dropped = new Set((mine ?? []).filter((m) => m.status === "dropped" || m.status === "cancelled").map((m) => m.ticker));
   const live = new Set((mine ?? []).filter((m) => m.status === "open" || m.status === "filled").map((m) => m.ticker));
@@ -125,6 +133,7 @@ export async function promoteAlternate(plan: { signal_date: string; kind: string
     comp_rank: next.comp_rank, mom_pct: s.mom_pct, h52: s.h52, days_since_high: s.days_since_high, sector: next.sector,
     sigma63: next.sigma63, atr20: s.atr20, w: next.w, t_target: next.T, s_close: next.S, cap: next.cap, planned_shares: next.shares,
     risk_cap_shares: next.byRisk, trade_date: tradeDay, retry_day: 1, note: "Promoted to fill a dropped slot", updated_at: new Date().toISOString(),
+    earnings_unchecked: !!opts.earningsUnchecked,
   };
   const { error } = await db().from("ss_mom_tickets").upsert(row, { onConflict: "signal_date,kind,side,ticker" });
   if (error) throw new Error(`ss_mom_tickets: ${error.message}`);
@@ -132,7 +141,13 @@ export async function promoteAlternate(plan: { signal_date: string; kind: string
 }
 
 /** Roll every open, unfilled buy ticket into `tradeDay` (retry rules), promoting alternates as slots free up. */
-export async function advanceTickets(latestSignal: string, tradeDay: string, cfg: MomConfig, cal: Calendar) {
+/**
+ * `allowNewBuys: false` (data-quality gate) still rolls and drops tickets, but leaves a dropped
+ * slot empty instead of promoting the next name.
+ */
+export async function advanceTickets(latestSignal: string, tradeDay: string, cfg: MomConfig, cal: Calendar,
+  opts: { allowNewBuys?: boolean; earningsUnchecked?: boolean } = {}) {
+  const allowNewBuys = opts.allowNewBuys ?? true;
   const { data: open } = await db().from("ss_mom_tickets").select("*").eq("side", "buy").eq("status", "open").lt("trade_date", tradeDay);
   if (!open?.length) return { advanced: 0, dropped: 0, promoted: [] as string[] };
   const { data: latest } = await db().from("ss_mom_snapshots").select("ticker, entry_ok, close")
@@ -153,7 +168,7 @@ export async function advanceTickets(latestSignal: string, tradeDay: string, cfg
     if (promote) {
       dropped++;
       // A dropped top-up just lapses; only new-position slots go to the next name.
-      const p = t.kind === "topup" ? null : await promoteAlternate(t, tradeDay, cfg, cal);
+      const p = t.kind === "topup" || !allowNewBuys ? null : await promoteAlternate(t, tradeDay, cfg, cal, { earningsUnchecked: opts.earningsUnchecked });
       if (p) promoted.push(p);
     }
   }

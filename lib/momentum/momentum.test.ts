@@ -383,3 +383,67 @@ test("unknown-sector names don't share a cap", () => {
   assert.deepEqual(p.buys.filter((b) => b.sector.startsWith("unknown:")).map((b) => b.ticker), ["U1", "U2", "U3", "U4", "U5"]);
   assert.ok(!p.skipped.some((s) => s.ticker.startsWith("U")));
 });
+
+// --- Buy safety: data-quality gate and earnings check ---
+import { dataGate, earningsChecked } from "./quality.ts";
+import { earningsWarning } from "./notify-format.ts";
+
+const good = { universe: 1551, no_mcap: 4, news_days: 90 };
+
+test("earnings blackout defaults to 5 trading days", () => {
+  assert.equal(MOM_DEFAULTS.earnings_blackout_days, 5);
+});
+
+test("gate passes on clean data", () => {
+  const g = dataGate({ ...good, universe: 1600 }, { signal_date: "2026-09-29", quality: good }, MOM_DEFAULTS);
+  assert.deepEqual(g, { ok: true, reasons: [], comparedTo: "2026-09-29" });
+});
+
+test("gate blocks when more than 50 liquid names lack a market cap", () => {
+  assert.equal(dataGate({ ...good, no_mcap: 50 }, null, MOM_DEFAULTS).ok, true);
+  const g = dataGate({ ...good, no_mcap: 51 }, null, MOM_DEFAULTS);
+  assert.equal(g.ok, false);
+  assert.match(g.reasons[0], /51 liquid stocks have no market cap/);
+});
+
+test("gate blocks when the news sweep covers fewer than 85 of 90 days", () => {
+  assert.equal(dataGate({ ...good, news_days: 85 }, null, MOM_DEFAULTS).ok, true);
+  assert.match(dataGate({ ...good, news_days: 84 }, null, MOM_DEFAULTS).reasons[0], /covers 84 of the last 90 days/);
+  assert.equal(dataGate({ ...good, news_days: null }, null, MOM_DEFAULTS).ok, false);
+});
+
+test("gate blocks a universe change over 25% against a clean previous run", () => {
+  const prev = { signal_date: "2026-09-29", quality: good };
+  assert.equal(dataGate({ ...good, universe: Math.floor(1551 * 1.25) }, prev, MOM_DEFAULTS).ok, true);
+  const up = dataGate({ ...good, universe: 1940 }, prev, MOM_DEFAULTS);
+  assert.equal(up.ok, false);
+  assert.match(up.reasons[0], /universe changed 25% since 2026-09-29/);
+  const down = dataGate({ ...good, universe: 1100 }, prev, MOM_DEFAULTS);
+  assert.match(down.reasons[0], /universe changed -29% since 2026-09-29 \(1551 → 1100/);
+});
+
+test("gate skips the universe comparison when either run failed the market-cap check", () => {
+  // 9/28 → 9/29: 376 → 1,551 (+312%) while market caps backfilled; 9/28 had 1,563 missing.
+  const g = dataGate(good, { signal_date: "2026-09-28", quality: { universe: 376, no_mcap: 1563, news_days: 32 } }, MOM_DEFAULTS);
+  assert.deepEqual(g, { ok: true, reasons: [], comparedTo: null });
+  // And a run that itself fails the market-cap check is blocked for that, not compared.
+  const bad = dataGate({ universe: 376, no_mcap: 1563, news_days: 90 }, { signal_date: "2026-09-29", quality: good }, MOM_DEFAULTS);
+  assert.equal(bad.comparedTo, null);
+  assert.equal(bad.reasons.length, 1);
+});
+
+test("earnings check: a sync error or no future rows means unchecked", () => {
+  assert.deepEqual(earningsChecked(4200, null), { ok: true, reason: null });
+  assert.equal(earningsChecked(0, null).ok, false);
+  assert.match(earningsChecked(4200, "Finnhub 429").reason!, /sync failed \(Finnhub 429\)/);
+});
+
+test("morning push leads with the earnings-unchecked warning", () => {
+  assert.equal(earningsWarning(0), null);
+  const w = earningsWarning(13)!;
+  assert.equal(w, "⚠ Earnings unchecked: 13 buy orders today weren't screened for earnings — check each before buying");
+  const m = formatSellPush("2026-10-01", [], 0, [], [w]);
+  assert.equal(m.title, "Momentum Thu, Oct 1: no sells");
+  assert.equal(m.body, `${w}\nNo open positions.`);
+  assert.equal(earningsWarning(1), "⚠ Earnings unchecked: 1 buy order today wasn't screened for earnings — check each before buying");
+});
