@@ -166,10 +166,10 @@ export async function backfill(budgetMs = 270_000) {
   }
   let indicators: number | null = null;
   if (done.length) {
-    // Must not fail silently: if this errors (e.g. a statement timeout) the whole snapshot goes stale.
-    const { data, error } = await db().rpc("ss_refresh_indicators");
-    if (error) throw new Error(`ss_refresh_indicators: ${error.message}`);
-    indicators = data as number;
+    // A full refresh can exceed the API gateway timeout; queue it inside Postgres instead.
+    const { error } = await db().rpc("ss_queue_maintenance");
+    if (error) throw new Error(`ss_queue_maintenance: ${error.message}`);
+    indicators = -1; // refreshed by the database within a minute
   }
   return {
     loaded: done.length - filled,
@@ -191,13 +191,10 @@ export async function nightlyEod() {
   const date = weekdaysBack(nyToday(), 7)[0]; // most recent weekday before today (NY time)
   const rows = await ingestDay(date);
   if (rows === 0) return { date, rows, note: "no bars (holiday or not published yet)" };
-  const { data: updated, error } = await db().rpc("ss_refresh_indicators", { p_as_of: date });
-  if (error) throw new Error(`ss_refresh_indicators: ${error.message}`);
-  const { data: pruned, error: pruneError } = await db().rpc("ss_prune_bars", { p_days: HISTORY_DAYS, p_long_days: LONG_HISTORY_DAYS });
-  return { date, rows, indicators: updated, pruned, ...(pruneError ? { pruneError: pruneError.message } : {}) };
+  // Indicators and pruning run inside Postgres at 10:10 UTC (ss_nightly_maintenance via pg_cron):
+  // the refresh takes longer than the API gateway allows for one request.
+  return { date, rows };
 }
-
-// ───────────── Options scan ─────────────
 
 export async function loadScreener(): Promise<ScreenerRow[]> {
   return fetchAll<ScreenerRow>((a, b) => db().from("ss_screener").select("*").order("ticker").range(a, b));

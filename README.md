@@ -26,10 +26,11 @@ Earnings dates come from **Finnhub** (free key): every trading morning the momen
 
 | Job | When | What |
 |---|---|---|
-| `ss-eod` | Tue–Sat 10:05 (≈ 6am ET) | Load the **previous** trading day's bars → recompute indicators → prune old bars. Massive's free plan won't serve a day's bars until well after the close, so this runs the next morning. |
+| `ss-eod` | Tue–Sat 10:05 (≈ 6am ET) | Load the **previous** trading day's bars (indicators and pruning follow at 10:10 inside the database). Massive's free plan won't serve a day's bars until well after the close, so this runs the next morning. |
 | `ss-tickers` | Sun 12:05 | Refresh the ticker list and S&P 500 membership (~3 min at the free rate limit). |
 | `ss-alerts` | Tue–Sat 10:25 (≈ 6:25am ET) | Evaluate alert rules on the previous close and send push before the open. |
 | `ss-fundamentals` | every minute | 2 tickers per run. Waits until the backfill is done. |
+| `ss-indicators` | Tue–Sat 10:10 (≈ 6:10am ET) | Inside Postgres (pg_cron): recompute indicators from the new bars and prune old bars. Runs in the database because it takes ~2 minutes, longer than the API gateway allows for one request. |
 | `ss-momentum` | Tue–Sat 10:15 | Sync splits and re-fetch bars for split tickers, then validation, universe, signals, ranking snapshot and regime for the latest trading day. |
 | `ss-momentum-notify` | Mon–Fri 11:45 (≈ 7:45am ET) | Push today's momentum sells and why (stop hit, dropped off / failed hold test, regime, buyout, halt, trim), or "no sells". Skips market holidays. |
 | `ss-backfill` | every 6 min | Loads about 20 missing days per run, up to 400 days back. Once history is complete it does nothing. |
