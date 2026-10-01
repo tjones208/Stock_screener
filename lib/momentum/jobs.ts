@@ -1,7 +1,7 @@
 import "server-only";
 // Momentum strategy jobs: data upkeep (splits, holidays, news), validation and the ranking build.
 import { db, fetchAll, upsertChunks } from "../db";
-import { dailyRange, newsForDay, splitsSince, upcomingHolidays } from "../massive";
+import { dailyRange, newsForDay, newsForTicker, splitsSince, upcomingHolidays } from "../massive";
 import { addDays, nyToday } from "../dates";
 import { LONG_HISTORY_DAYS, REGIME_TICKER } from "../jobs";
 import { capitalAndSlots, normalizeMomConfig, type MomConfig } from "./config";
@@ -18,9 +18,9 @@ import { refreshCallIdeas, settleExpiredCalls } from "./covered";
 import { dataGate, passedMcapCheck, type RunQuality } from "./quality";
 import { earningsStatus } from "../earnings-sync";
 import { regimeAt, type Regime } from "./regime";
-import { buyoutHits } from "./news";
+import { buyoutHits, dealEvents, dealState, type DealEvent } from "./news";
 
-const NEWS_DAYS = 90;
+const DEAL_DAYS = 365; // news sweep horizon for pending deals (buyout flags only matter for 90 days)
 
 export async function getMomConfig(): Promise<MomConfig> {
   const { data } = await db().from("ss_settings").select("value").eq("key", "momentum").maybeSingle();
@@ -94,39 +94,119 @@ export async function repairSplits(left: () => number) {
 }
 
 /**
- * Market-wide news sweep for acquisition headlines, one UTC day at a time (newest missing day first),
- * covering the last 90 calendar days. Hits become buyout_news (excluded) or buyout_review flags.
+ * Market-wide news sweep, one UTC day at a time (newest missing day first), 12 months back.
+ * Acquisition headlines become buyout_news / buyout_review flags (last 90 days matter for those)
+ * and deal events (open / closed / terminated) that keep ss_pending_deals current. Days swept
+ * before deal tracking existed are read once more for deal headlines.
  */
 export async function newsSweep(left: () => number) {
   const today = new Date().toISOString().slice(0, 10);
-  const { data: have } = await db().from("ss_news_days").select("d").gte("d", addDays(today, -NEWS_DAYS));
-  const got = new Set((have ?? []).map((r) => r.d as string));
+  const { data: have } = await db().from("ss_news_days").select("d, deals_scanned").gte("d", addDays(today, -DEAL_DAYS));
+  const done = new Set((have ?? []).filter((r) => r.deals_scanned).map((r) => r.d as string));
   const missing: string[] = [];
-  for (let i = 1; i <= NEWS_DAYS; i++) {
+  for (let i = 1; i <= DEAL_DAYS; i++) {
     const d = addDays(today, -i);
-    if (!got.has(d)) missing.push(d);
+    if (!done.has(d)) missing.push(d);
   }
-  if (!missing.length) return { days: 0, remaining: 0 };
-  const names = new Map(
-    (await fetchAll<{ ticker: string; name: string | null }>((a, b) =>
-      db().from("ss_tickers").select("ticker, name").eq("type", "CS").eq("active", true).range(a, b)))
-      .map((t) => [t.ticker, t.name ?? ""]),
-  );
+  const names = await commonStockNames();
+  // Names we may buy or hold get a direct 12-month news check first (the daily feed is thin).
+  const tickerChecks = await dealTickerChecks(left, names);
   let days = 0, matches = 0;
+  const touched = new Set<string>(tickerChecks.touched);
   for (const d of missing) {
     if (left() < 60_000) break; // a busy day can take several pages
     const articles = await newsForDay(d, addDays(d, 1));
-    const hits = articles.flatMap((a) =>
-      buyoutHits({ title: a.title ?? "", tickers: a.tickers ?? [], published: a.published_utc, url: a.article_url }, names));
+    const parsed = articles.map((a) => ({ title: a.title ?? "", tickers: a.tickers ?? [], published: a.published_utc, url: a.article_url }));
+    const hits = parsed.flatMap((a) => buyoutHits(a, names));
     const flags = [...new Map(hits.map((h) => [`${h.ticker}|${h.kind}|${h.d}`, h])).values()].map((h) => ({
       ticker: h.ticker, kind: h.kind, d: h.d, detail: h.detail, excludes: h.kind === "buyout_news",
     }));
     if (flags.length) await upsertChunks("ss_data_flags", flags, "ticker,kind,d", 1000, true);
-    await db().from("ss_news_days").upsert({ d, articles: articles.length, matches: flags.length, fetched_at: new Date().toISOString() });
+    const events = await saveDealEvents(parsed.flatMap((a) => dealEvents(a, names)), "news");
+    for (const e of events) touched.add(e);
+    await db().from("ss_news_days").upsert({ d, articles: articles.length, matches: flags.length, deals_scanned: true, fetched_at: new Date().toISOString() });
     days++;
     matches += flags.length;
   }
-  return { days, matches, remaining: missing.length - days };
+  const deals = await refreshPendingDeals([...touched]);
+  return { days, matches, remaining: missing.length - days, tickerChecks: tickerChecks.checked, deals };
+}
+
+async function commonStockNames() {
+  return new Map(
+    (await fetchAll<{ ticker: string; name: string | null }>((a, b) =>
+      db().from("ss_tickers").select("ticker, name").eq("type", "CS").eq("active", true).range(a, b)))
+      .map((t) => [t.ticker, t.name ?? ""]),
+  );
+}
+
+/** Upsert deal events; returns the tickers they touch. */
+async function saveDealEvents(events: DealEvent[], source: "news" | "ticker_news") {
+  const rows = [...new Map(events.map((e) => [`${e.ticker}|${e.d}|${e.kind}|${e.headline}`, e])).values()]
+    .map((e) => ({ ticker: e.ticker, d: e.d, kind: e.kind, headline: e.headline, url: e.url, source }));
+  if (rows.length) await upsertChunks("ss_deal_events", rows, "ticker,d,kind,headline", 1000, true);
+  return [...new Set(rows.map((r) => r.ticker))];
+}
+
+/**
+ * Direct 12-month news check for names with open buy tickets, alternates, open lots or a top-60
+ * rank, at most once a week each (one call per ticker).
+ */
+async function dealTickerChecks(left: () => number, names: Map<string, string>) {
+  const [{ data: tix }, { data: lots }, { data: run }, { data: scans }] = await Promise.all([
+    db().from("ss_mom_tickets").select("ticker").eq("side", "buy").in("status", ["open", "alternate"]),
+    db().from("ss_mom_lots").select("ticker").is("exit_date", null),
+    db().from("ss_mom_runs").select("signal_date").order("signal_date", { ascending: false }).limit(1).maybeSingle(),
+    db().from("ss_deal_ticker_scans").select("ticker, scanned_at"),
+  ]);
+  const { data: top } = run
+    ? await db().from("ss_mom_snapshots").select("ticker").eq("signal_date", run.signal_date).order("comp_rank").limit(60)
+    : { data: [] as { ticker: string }[] };
+  const weekAgo = Date.now() - 7 * 86_400_000;
+  const fresh = new Set((scans ?? []).filter((x) => Date.parse(x.scanned_at as string) > weekAgo).map((x) => x.ticker as string));
+  const want = [...new Set([...(tix ?? []), ...(lots ?? []), ...(top ?? [])].map((x) => x.ticker as string))].filter((t) => !fresh.has(t));
+  const today = new Date().toISOString().slice(0, 10);
+  const touched: string[] = [];
+  let checked = 0;
+  for (const t of want) {
+    if (left() < 90_000) break; // leave time for the day sweep
+    const articles = await newsForTicker(t, addDays(today, -DEAL_DAYS), addDays(today, 1));
+    const ev = articles.flatMap((a) => dealEvents({ title: a.title ?? "", tickers: a.tickers ?? [], published: a.published_utc, url: a.article_url }, names))
+      .filter((e) => e.ticker === t);
+    touched.push(...(await saveDealEvents(ev, "ticker_news")));
+    await db().from("ss_deal_ticker_scans").upsert({ ticker: t, scanned_at: new Date().toISOString() });
+    checked++;
+  }
+  return { checked, touched };
+}
+
+/** Recompute ss_pending_deals for these tickers from all their events (order-independent). */
+export async function refreshPendingDeals(tickers: string[]) {
+  if (!tickers.length) return { open: 0, ended: 0 };
+  let open = 0, ended = 0;
+  for (let i = 0; i < tickers.length; i += 200) {
+    const chunk = tickers.slice(i, i + 200);
+    const [{ data: ev }, { data: prev }] = await Promise.all([
+      db().from("ss_deal_events").select("ticker, d, kind, headline, url").in("ticker", chunk),
+      db().from("ss_pending_deals").select("ticker, status, opened_d, cleared_at").in("ticker", chunk),
+    ]);
+    const prior = new Map((prev ?? []).map((p) => [p.ticker as string, p]));
+    for (const t of chunk) {
+      const events = ((ev ?? []) as DealEvent[]).filter((e) => e.ticker === t);
+      const st = dealState(t, events, prior.get(t) as { status: string; opened_d: string; cleared_at: string | null } | undefined);
+      if (!st) continue;
+      const openEv = events.find((e) => e.kind === "open" && e.d === st.opened_d);
+      const endEv = st.ended_d ? events.find((e) => e.kind !== "open" && e.d === st.ended_d) : null;
+      await db().from("ss_pending_deals").upsert({
+        ticker: t, opened_d: st.opened_d, headline: st.headline, url: openEv?.url ?? null, status: st.status,
+        ended_d: st.ended_d, end_headline: endEv?.headline ?? null,
+        cleared_at: st.status === "cleared" ? (prior.get(t)?.cleared_at ?? new Date().toISOString()) : null,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: "ticker" });
+      if (st.status === "open") open++; else ended++;
+    }
+  }
+  return { open, ended };
 }
 
 async function spyBars(t: string) {

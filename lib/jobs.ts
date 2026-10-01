@@ -1,6 +1,6 @@
 import "server-only";
 import { db, fetchAll, upsertChunks } from "./db";
-import { sum4, tickerPatch } from "./fundamentals-calc";
+import { fetchFundamentals, runQueue, sum4, tickerPatch } from "./fundamentals-calc";
 import { balanceSheet, dailyRange, groupedDaily, incomeStatements, listTickers, tickerDetails, type BalanceSheet, type IncomeStatement } from "./massive";
 import { evaluateRules, type AlertRule } from "./alerts";
 import { cleanFilters, dbConditions, type Filters, type ScreenerRow } from "./screen";
@@ -288,76 +288,77 @@ const ratio = (a: number | null, b: number | null, pct = false) =>
  */
 export async function fundamentalsBatch(count = 1) {
   const { data: queue } = await db().from("ss_fundamentals_queue").select("ticker").limit(count);
-  const done: string[] = [];
   const errors: { ticker: string; step: string; error: string }[] = [];
-  for (const { ticker } of queue ?? []) {
-    let details: Awaited<ReturnType<typeof tickerDetails>> = null;
-    try {
-      details = await tickerDetails(ticker);
-    } catch (e) {
-      errors.push({ ticker, step: "details", error: String(e).slice(0, 300) });
+  const res = await runQueue((queue ?? []).map((q) => q.ticker as string), async (ticker) => {
+    const r = await fetchFundamentals(ticker, { details: tickerDetails, income: incomeStatements, balance: balanceSheet });
+    if (r.kind === "not_found") {
+      // Gone at Massive (e.g. a retired note like RILYN): mark inactive so it leaves the queue and
+      // the screens; the weekly ticker sync re-activates it if Massive lists it again.
+      await db().from("ss_tickers").update({ active: false, updated_at: new Date().toISOString() }).eq("ticker", ticker);
+      await db().from("ss_fundamentals").upsert({ ticker, raw: { skipped: "ticker not found", error: r.error }, fetched_at: new Date().toISOString() }, { onConflict: "ticker" });
+      errors.push({ ticker, step: "details", error: r.error });
+      return "skipped";
     }
-    if (details) {
-      await db().from("ss_tickers").update({ ...tickerPatch(details), updated_at: new Date().toISOString() }).eq("ticker", ticker);
-      // Non-S&P names take their sector from SIC (recomputed each fetch so mapping fixes apply);
-      // S&P names keep their GICS sector and industry.
-      await db().from("ss_tickers")
-        .update({ sector: sectorFromSic(details.sic_code), industry: details.sic_description ?? null })
-        .eq("ticker", ticker).eq("in_sp500", false);
-    }
-
-    let inc: IncomeStatement[] = [];
-    let bs: BalanceSheet | null = null;
-    try {
-      inc = await incomeStatements(ticker);
-      bs = await balanceSheet(ticker);
-    } catch (e) {
-      errors.push({ ticker, step: "financials", error: String(e).slice(0, 300) });
-    }
-    const [{ data: ind }, { data: tk }] = await Promise.all([
-      db().from("ss_indicators").select("close").eq("ticker", ticker).maybeSingle(),
-      db().from("ss_tickers").select("market_cap").eq("ticker", ticker).maybeSingle(),
-    ]);
-    const close = ind?.close ?? null;
-    const marketCap = (tk?.market_cap as number | null | undefined) ?? null;
-    const q0 = inc[0];
-    const revenue = sum4(inc, "revenue");
-    const netIncome = sum4(inc, "net_income_loss_attributable_common_shareholders") ?? sum4(inc, "consolidated_net_income_loss");
-    const gross = sum4(inc, "gross_profit");
-    const opInc = sum4(inc, "operating_income");
-    const eps = sum4(inc, "diluted_earnings_per_share") ?? sum4(inc, "basic_earnings_per_share");
-    const equity = bs?.total_equity_attributable_to_parent ?? bs?.total_equity ?? null;
-    const liabilities = bs?.total_liabilities ?? null;
-    const revQ0 = q0?.revenue ?? null;
-    const revQ4 = inc[4]?.revenue ?? null;
-
-    // Statements unavailable: keep the old fundamentals row rather than blanking it.
-    if (inc.length || bs) {
-      await db().from("ss_fundamentals").upsert({
-        ticker,
-        period_end: q0?.period_end ?? null,
-        fiscal_period: q0 ? `Q${q0.fiscal_quarter ?? ""} ${q0.fiscal_year ?? ""}`.trim() : null,
-        revenue_ttm: revenue,
-        revenue_growth_yoy: revQ0 != null && revQ4 ? ((revQ0 - revQ4) / Math.abs(revQ4)) * 100 : null,
-        net_income_ttm: netIncome,
-        eps_ttm: eps,
-        pe: close != null && eps != null && eps > 0 ? close / eps : null,
-        ps: ratio(marketCap, revenue),
-        pb: equity != null && equity > 0 ? ratio(marketCap, equity) : null,
-        gross_margin: ratio(gross, revenue, true),
-        operating_margin: ratio(opInc, revenue, true),
-        net_margin: ratio(netIncome, revenue, true),
-        roe: equity != null && equity > 0 ? ratio(netIncome, equity, true) : null,
-        debt_to_equity: equity != null && equity > 0 ? ratio(liabilities, equity) : null,
-        current_ratio: ratio(bs?.total_current_assets ?? null, bs?.total_current_liabilities ?? null),
-        raw: { details, latest: q0 ?? null, balance: bs },
-        fetched_at: new Date().toISOString(),
-      }, { onConflict: "ticker" });
-    } else {
-      // Still mark it fetched so the queue moves on; the next pass retries it.
-      await db().from("ss_fundamentals").upsert({ ticker, raw: { details, error: errors.at(-1)?.error ?? null }, fetched_at: new Date().toISOString() }, { onConflict: "ticker", ignoreDuplicates: false });
-    }
-    done.push(ticker);
+    errors.push(...r.errors.map((e) => ({ ticker, ...e })));
+    await saveFundamentals(ticker, r.details, r.inc, r.bs);
+    return "done";
+  });
+  // A failure while saving one ticker still marks it fetched, so the queue never sticks on it.
+  for (const f of res.failed) {
+    errors.push({ ticker: f.ticker, step: "save", error: f.error });
+    await db().from("ss_fundamentals").upsert({ ticker: f.ticker, raw: { error: f.error }, fetched_at: new Date().toISOString() }, { onConflict: "ticker" });
   }
-  return { fetched: done, ...(errors.length ? { errors } : {}) };
+  return { fetched: res.done, ...(res.skipped.length ? { skipped: res.skipped } : {}), ...(errors.length ? { errors } : {}) };
+}
+
+async function saveFundamentals(ticker: string, details: Awaited<ReturnType<typeof tickerDetails>>, inc: IncomeStatement[], bs: BalanceSheet | null) {
+  if (details) {
+    await db().from("ss_tickers").update({ ...tickerPatch(details), updated_at: new Date().toISOString() }).eq("ticker", ticker);
+    // Non-S&P names take their sector from SIC (recomputed each fetch so mapping fixes apply);
+    // S&P names keep their GICS sector and industry.
+    await db().from("ss_tickers")
+      .update({ sector: sectorFromSic(details.sic_code), industry: details.sic_description ?? null })
+      .eq("ticker", ticker).eq("in_sp500", false);
+  }
+  const [{ data: ind }, { data: tk }] = await Promise.all([
+    db().from("ss_indicators").select("close").eq("ticker", ticker).maybeSingle(),
+    db().from("ss_tickers").select("market_cap").eq("ticker", ticker).maybeSingle(),
+  ]);
+  const close = ind?.close ?? null;
+  const marketCap = (tk?.market_cap as number | null | undefined) ?? null;
+  const q0 = inc[0];
+  const revenue = sum4(inc, "revenue");
+  const netIncome = sum4(inc, "net_income_loss_attributable_common_shareholders") ?? sum4(inc, "consolidated_net_income_loss");
+  const gross = sum4(inc, "gross_profit");
+  const opInc = sum4(inc, "operating_income");
+  const eps = sum4(inc, "diluted_earnings_per_share") ?? sum4(inc, "basic_earnings_per_share");
+  const equity = bs?.total_equity_attributable_to_parent ?? bs?.total_equity ?? null;
+  const liabilities = bs?.total_liabilities ?? null;
+  const revQ0 = q0?.revenue ?? null;
+  const revQ4 = inc[4]?.revenue ?? null;
+  if (!inc.length && !bs) {
+    // Statements unavailable: keep the old fundamentals row, just mark it fetched so the queue moves on.
+    await db().from("ss_fundamentals").upsert({ ticker, raw: { details, error: "no statements" }, fetched_at: new Date().toISOString() }, { onConflict: "ticker" });
+    return;
+  }
+  await db().from("ss_fundamentals").upsert({
+    ticker,
+    period_end: q0?.period_end ?? null,
+    fiscal_period: q0 ? `Q${q0.fiscal_quarter ?? ""} ${q0.fiscal_year ?? ""}`.trim() : null,
+    revenue_ttm: revenue,
+    revenue_growth_yoy: revQ0 != null && revQ4 ? ((revQ0 - revQ4) / Math.abs(revQ4)) * 100 : null,
+    net_income_ttm: netIncome,
+    eps_ttm: eps,
+    pe: close != null && eps != null && eps > 0 ? close / eps : null,
+    ps: ratio(marketCap, revenue),
+    pb: equity != null && equity > 0 ? ratio(marketCap, equity) : null,
+    gross_margin: ratio(gross, revenue, true),
+    operating_margin: ratio(opInc, revenue, true),
+    net_margin: ratio(netIncome, revenue, true),
+    roe: equity != null && equity > 0 ? ratio(netIncome, equity, true) : null,
+    debt_to_equity: equity != null && equity > 0 ? ratio(liabilities, equity) : null,
+    current_ratio: ratio(bs?.total_current_assets ?? null, bs?.total_current_liabilities ?? null),
+    raw: { details, latest: q0 ?? null, balance: bs },
+    fetched_at: new Date().toISOString(),
+  }, { onConflict: "ticker" });
 }

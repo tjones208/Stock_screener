@@ -23,8 +23,21 @@ export async function saveMomConfig(form: FormData) {
 }
 
 export async function clearFlag(form: FormData) {
+  const ticker = String(form.get("ticker")), kind = String(form.get("kind"));
   await db().from("ss_data_flags").update({ cleared: true, cleared_at: new Date().toISOString() })
-    .eq("ticker", String(form.get("ticker"))).eq("kind", String(form.get("kind"))).eq("d", String(form.get("d")));
+    .eq("ticker", ticker).eq("kind", kind).eq("d", String(form.get("d")));
+  // Clearing the acquisition headline by hand also clears the pending deal it opened.
+  if (kind === "buyout_news") {
+    await db().from("ss_pending_deals").update({ status: "cleared", cleared_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+      .eq("ticker", ticker).eq("status", "open");
+  }
+  revalidatePath("/momentum");
+}
+
+/** Clear a pending deal by hand (e.g. a false match): the stock is eligible again until a newer deal headline. */
+export async function clearDeal(form: FormData) {
+  await db().from("ss_pending_deals").update({ status: "cleared", cleared_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+    .eq("ticker", String(form.get("ticker"))).eq("status", "open");
   revalidatePath("/momentum");
 }
 

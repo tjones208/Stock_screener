@@ -7,6 +7,9 @@ let lastCall = 0;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+export { MassiveError, isNotFound } from "./fundamentals-calc";
+import { MassiveError } from "./fundamentals-calc";
+
 async function get<T>(pathOrUrl: string, params: Record<string, string | number> = {}): Promise<T> {
   const base = envOr("MASSIVE_BASE_URL", "https://api.massive.com");
   const url = new URL(pathOrUrl.startsWith("http") ? pathOrUrl : base + pathOrUrl);
@@ -24,7 +27,7 @@ async function get<T>(pathOrUrl: string, params: Record<string, string | number>
     }
     if (!res.ok) {
       const sunset = [res.headers.get("sunset") && `sunset ${res.headers.get("sunset")}`, res.headers.get("link")].filter(Boolean).join("; ");
-      throw new Error(`Massive ${url.pathname} → ${res.status} ${(await res.text()).slice(0, 300)}${sunset ? ` [${sunset}]` : ""}`);
+      throw new MassiveError(res.status, `Massive ${url.pathname} → ${res.status} ${(await res.text()).slice(0, 300)}${sunset ? ` [${sunset}]` : ""}`);
     }
     if (res.headers.get("deprecation")) console.warn(`Massive ${url.pathname} is deprecated: sunset ${res.headers.get("sunset")} ${res.headers.get("link") ?? ""}`);
     return (await res.json()) as T;
@@ -149,6 +152,14 @@ export async function upcomingHolidays(): Promise<MarketHoliday[]> {
 }
 
 export type NewsArticle = { title: string; tickers?: string[]; published_utc: string; article_url: string };
+
+/** One ticker's news between two UTC dates (oldest first). */
+export function newsForTicker(ticker: string, from: string, to: string): Promise<NewsArticle[]> {
+  return getAll<NewsArticle>("/v2/reference/news", {
+    ticker, "published_utc.gte": `${from}T00:00:00Z`, "published_utc.lt": `${to}T00:00:00Z`,
+    order: "asc", sort: "published_utc", limit: 1000,
+  }, 5);
+}
 
 /** All news published on one UTC calendar day (whole market). */
 export function newsForDay(day: string, nextDay: string): Promise<NewsArticle[]> {

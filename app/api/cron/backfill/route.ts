@@ -14,7 +14,8 @@ export const GET = cronRoute("backfill", async () => {
   const tickers = count ? null : await syncTickers();
   const history = await backfill(tickers ? 120_000 : 270_000);
   if (history.loaded || history.remaining || history.aboveOldCapFilled) return { tickers, ...history };
-  const end = Date.now() + 120_000;
+  // ~4 minutes for upkeep: split repairs, then the 12-month news sweep and deal checks.
+  const end = Date.now() + 240_000;
   const left = () => end - Date.now();
   const repairs = await repairSplits(left);
   const news = await newsSweep(left).catch((e) => ({ error: String(e) }));

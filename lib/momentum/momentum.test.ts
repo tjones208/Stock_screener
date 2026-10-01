@@ -727,3 +727,77 @@ function manualBase(): ManualCheck {
     sector: "Energy", sectorNamesAfter: 2, sectorDollarsAfter: 3000, shares: 56, price: 21.12, D: 2.35, target: 1189, valueBefore: 0,
   };
 }
+
+// ───────────── Fundamentals 404 and pending deals ─────────────
+import { fetchFundamentals, runQueue, MassiveError, isNotFound } from "../fundamentals-calc.ts";
+import { dealEvents, dealState, type DealEvent } from "./news.ts";
+
+test("fundamentals: a Massive 404 'Ticker not found' skips the ticker; the queue continues", async () => {
+  const notFound = new MassiveError(404, 'Massive /v3/reference/tickers/RILYN → 404 {"status":"NOT_FOUND","message":"Ticker not found."}');
+  assert.equal(isNotFound(notFound), true);
+  assert.equal(isNotFound(new Error('Massive /v3/reference/tickers/X → 404 {"status":"NOT_FOUND"}')), true);
+  assert.equal(isNotFound(new MassiveError(500, "boom")), false);
+  let statementCalls = 0;
+  const deps = {
+    details: async (t: string) => { if (t === "RILYN") throw notFound; return { ticker: t, market_cap: 5e9 }; },
+    income: async () => { statementCalls++; return [{ revenue: 1 }]; },
+    balance: async () => null,
+  };
+  const r = await fetchFundamentals("RILYN", deps);
+  assert.equal(r.kind, "not_found");
+  assert.equal(statementCalls, 0); // no statement calls for a ticker that doesn't exist
+  const ok = await fetchFundamentals("AAPL", deps);
+  assert.equal(ok.kind, "ok");
+  // Outage on statements: collected, not thrown.
+  const flaky = await fetchFundamentals("AAPL", { ...deps, income: async () => { throw new MassiveError(503, "down"); } });
+  assert.ok(flaky.kind === "ok" && flaky.errors[0].step === "financials");
+  // The batch keeps going past a skipped ticker and past one that throws.
+  const seen: string[] = [];
+  const q = await runQueue(["RILYN", "BAD", "AAPL"], async (t) => {
+    seen.push(t);
+    if (t === "BAD") throw new Error("db down");
+    return (await fetchFundamentals(t, deps)).kind === "not_found" ? "skipped" : "done";
+  });
+  assert.deepEqual(seen, ["RILYN", "BAD", "AAPL"]);
+  assert.deepEqual([q.skipped, q.done, q.failed.map((f) => f.ticker)], [["RILYN"], ["AAPL"], ["BAD"]]);
+});
+
+const dealNames = new Map([["ZIM", "ZIM Integrated Shipping Services Ltd."], ["ACME", "Acme Corp"], ["FOO", "Foo Holdings Inc"]]);
+const art = (title: string, tickers: string[], published = "2026-02-16T12:00:00Z") => ({ title, tickers, published, url: "https://example.com/a" });
+
+test("pending deals: definitive agreement opens, closed / terminated headlines end it", () => {
+  const open1 = dealEvents(art("Hapag-Lloyd to acquire ZIM for $35 per share in cash", ["ZIM"]), dealNames);
+  assert.deepEqual(open1.map((e) => [e.ticker, e.kind, e.d]), [["ZIM", "open", "2026-02-16"]]);
+  const open2 = dealEvents(art("ZIM Integrated Shipping enters into definitive agreement to be acquired by Hapag-Lloyd", ["ZIM"]), dealNames);
+  assert.equal(open2[0].kind, "open");
+  // Generic merger-agreement headline: opens only when one stock is tagged.
+  assert.equal(dealEvents(art("Foo signs definitive merger agreement", ["FOO"]), dealNames)[0].kind, "open");
+  assert.deepEqual(dealEvents(art("Acme and Foo sign definitive merger agreement", ["ACME", "FOO"]), dealNames), []);
+  const closed = dealEvents(art("Hapag-Lloyd completes acquisition of ZIM", ["ZIM"], "2026-11-02T12:00:00Z"), dealNames);
+  assert.deepEqual(closed.map((e) => e.kind), ["closed"]);
+  const term = dealEvents(art("ZIM and Hapag-Lloyd terminate merger agreement", ["ZIM"], "2026-06-01T12:00:00Z"), dealNames);
+  assert.deepEqual(term.map((e) => e.kind), ["terminated"]);
+  assert.deepEqual(dealEvents(art("Acme closes $500 million notes offering", ["ACME"]), dealNames), []);
+  assert.deepEqual(dealEvents(art("Acme beats earnings estimates", ["ACME"]), dealNames), []);
+});
+
+test("pending deals: state is order-independent, stays open past 90 days, and a manual clear sticks", () => {
+  const ev = (kind: DealEvent["kind"], d: string): DealEvent => ({ ticker: "ZIM", kind, d, headline: `${kind} ${d}`, url: "u" });
+  // Announced in February; still open in October (well past the 90-day news window).
+  assert.deepEqual(dealState("ZIM", [ev("open", "2026-02-16"), ev("open", "2026-03-01")]),
+    { ticker: "ZIM", opened_d: "2026-02-16", headline: "open 2026-02-16", status: "open", ended_d: null });
+  // Found the close first, the opening later: still ended.
+  const ended = dealState("ZIM", [ev("closed", "2026-08-01"), ev("open", "2026-02-16")])!;
+  assert.deepEqual([ended.status, ended.ended_d], ["closed", "2026-08-01"]);
+  assert.equal(dealState("ZIM", [ev("open", "2026-02-16"), ev("terminated", "2026-06-01")])!.status, "terminated");
+  // A new deal after a terminated one opens again.
+  assert.equal(dealState("ZIM", [ev("open", "2026-02-16"), ev("terminated", "2026-06-01"), ev("open", "2026-09-01")])!.opened_d, "2026-09-01");
+  // Cleared by hand: stays cleared for the same deal, reopens on a newer one.
+  const prev = { status: "cleared", opened_d: "2026-02-16" };
+  assert.equal(dealState("ZIM", [ev("open", "2026-02-16")], prev)!.status, "cleared");
+  assert.equal(dealState("ZIM", [ev("open", "2026-02-16"), ev("closed", "2026-04-01"), ev("open", "2026-09-01")], prev)!.status, "open");
+  assert.equal(dealState("ZIM", [ev("closed", "2026-08-01")]), null);
+  // An open deal is acquisition news for a held name: exit trigger 4.
+  const p: Position = { ticker: "ZIM", lots: [lotB({ ticker: "ZIM" })], close: 95, active: true, holdOk: false, holdReason: "Pending acquisition (deal announced 2026-02-16)", buyoutNews: "2026-02-16", target: null, entryOk: false };
+  assert.equal(reviewPosition(p, { monthEnd: false, riskOn: true, cfg: MOM_DEFAULTS })!.trigger, 4);
+});

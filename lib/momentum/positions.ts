@@ -80,11 +80,13 @@ export async function exitReview(t: string, kind: "daily" | "weekly" | "monthly"
     db().from("ss_data_flags").select("ticker, d").eq("kind", "buyout_news").eq("cleared", false).in("ticker", tickers),
     db().from("ss_mom_tickets").select("ticker").eq("side", "sell").eq("status", "open"),
   ]);
+  // Open pending deals count as acquisition news however old the headline is.
+  const { data: deals } = await db().from("ss_pending_deals").select("ticker, opened_d").eq("status", "open").lte("opened_d", t).in("ticker", tickers);
   const { data: calls } = await db().from("ss_mom_calls").select("ticker, contract, contracts").in("status", ["open", "assign_pending"]).in("ticker", tickers);
   const close = new Map((bars ?? []).map((b) => [b.ticker, b.c as number]));
   const info = new Map((tk ?? []).map((x) => [x.ticker, x]));
   const s = new Map((snap ?? []).map((x) => [x.ticker, x]));
-  const buyout = new Map((flags ?? []).map((f) => [f.ticker, f.d as string]));
+  const buyout = new Map([...(deals ?? []).map((x) => [x.ticker, x.opened_d as string] as const), ...(flags ?? []).map((f) => [f.ticker, f.d as string] as const)]);
   const selling = new Set((openSells ?? []).map((x) => x.ticker));
 
   // Month-end targets for kept holdings (trim / top-up / brake) come from the same sizing as new

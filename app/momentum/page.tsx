@@ -13,7 +13,7 @@ import { planPortfolio, type Candidate, type Plan } from "@/lib/momentum/sizing"
 import { tickerSectors, withSectors } from "@/lib/momentum/sector-db";
 import { sectorLabel } from "@/lib/momentum/sector-key";
 import type { Regime } from "@/lib/momentum/regime";
-import { addPosition, assignCall, buyBackCall, expireCall, sellCall, clearFlag, dropTicket, exitTicket, fillTicket, markDisasterPosted, quoteExits, quoteTickets, saveMomConfig, undoLot, uploadEarnings } from "./actions";
+import { addPosition, clearDeal, assignCall, buyBackCall, expireCall, sellCall, clearFlag, dropTicket, exitTicket, fillTicket, markDisasterPosted, quoteExits, quoteTickets, saveMomConfig, undoLot, uploadEarnings } from "./actions";
 import { previewManual, type ManualPreview } from "@/lib/momentum/manual";
 import { TRIGGER_LABEL } from "@/lib/momentum/stops";
 import type { Ticket } from "@/lib/momentum/tickets";
@@ -86,6 +86,8 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
   const investedValue = lots.reduce((a, l) => a + l.shares * (lastClose.get(l.ticker) ?? l.fill_price), 0);
   const idle = idleCash(investedValue, I);
   const allFlags = (flags.data ?? []) as Flag[];
+  const { data: dealRows } = await db().from("ss_pending_deals").select("ticker, opened_d, headline, url").eq("status", "open").order("opened_d");
+  const deals = (dealRows ?? []) as { ticker: string; opened_d: string; headline: string; url: string | null }[];
   const blocking = allFlags.filter((f) => f.excludes);
   const review = allFlags.filter((f) => !f.excludes);
   const regime = run?.regime as Regime | null | undefined;
@@ -193,7 +195,7 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
 
       <Section id="buy" tag="buy" title="Buy today" count={buys.length} open={buys.length > 0}
         hint={buys.length ? "Buy orders to place after the sells fill" : "No buy orders. They appear the morning after a week- or month-end signal"}>
-        <TicketsSection open={buys} cfg={cfg} />
+        <TicketsSection open={buys} cfg={cfg} deals={new Set(deals.map((x) => x.ticker))} />
       </Section>
 
       <Section id="calls" tag="call" title="Covered calls" count={ideas.filter((i) => i.exp_latest).length + calls.length}
@@ -310,6 +312,28 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
             <tbody>{funnel.map((f, i) => <tr key={i}><td>{i + 1}. {f.step}</td><td>{f.count}</td></tr>)}</tbody>
           </table>
         </div>
+      </Section>
+
+      <Section tag="info" title="Pending deals" count={deals.length} open={false}
+        hint="Announced acquisitions: no entry and no hold until the deal closes, is terminated, or you clear it">
+        {deals.length ? (
+          <div className="table-wrap">
+            <table>
+              <thead><tr><th>Ticker</th><th>Announced</th><th style={{ textAlign: "left" }}>Headline</th><th></th></tr></thead>
+              <tbody>
+                {deals.map((x) => (
+                  <tr key={x.ticker}>
+                    <td><Link href={`/t/${x.ticker}`}><b>{x.ticker}</b></Link></td>
+                    <td>{x.opened_d}</td>
+                    <td style={{ textAlign: "left", whiteSpace: "normal" }}>{x.url ? <a href={x.url} target="_blank" rel="noreferrer">{x.headline}</a> : x.headline}</td>
+                    <td><form action={clearDeal}><input type="hidden" name="ticker" value={x.ticker} /><button type="submit" className="ghost">Clear</button></form></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : <p className="muted">No pending deals on record.</p>}
+        <p className="muted">From the news sweep (12 months back) and weekly news checks on tickets, alternates, holdings and the top 60. Clear a false match to make the stock eligible again.</p>
       </Section>
 
       <Section tag="info" title="Data flags" count={blocking.length + review.length} open={false}
@@ -518,7 +542,7 @@ function PlanSection({ plan, kind, signalDate, chase, budget, basis }: { plan: P
   );
 }
 
-function TicketsSection({ open, cfg }: { open: Ticket[]; cfg: Awaited<ReturnType<typeof getMomConfig>> }) {
+function TicketsSection({ open, cfg, deals }: { open: Ticket[]; cfg: Awaited<ReturnType<typeof getMomConfig>>; deals: Set<string> }) {
   const tradeDay = open[0]?.trade_date;
   const chrome =
     `At 9:45 AM ET, open my brokerage account and look up the current bid and ask for these tickers: ${open.map((t) => t.ticker).join(", ")}. ` +
@@ -549,7 +573,8 @@ function TicketsSection({ open, cfg }: { open: Ticket[]; cfg: Awaited<ReturnType
                   {open.map((t) => (
                     <tr key={t.id}>
                       <td><span className="tag tag-buy">BUY</span> <Link href={`/t/${t.ticker}`}><b>{t.ticker}</b></Link><input type="hidden" name="id" value={t.id} /> <AddLink ticker={t.ticker} />
-                        {t.earnings_unchecked && <span className="tag tag-sell" title="Not screened for earnings: check the report date before buying" style={{ marginLeft: 4 }}>EARNINGS UNCHECKED</span>}</td>
+                        {t.earnings_unchecked && <span className="tag tag-sell" title="Not screened for earnings: check the report date before buying" style={{ marginLeft: 4 }}>EARNINGS UNCHECKED</span>}
+                        {deals.has(t.ticker) && <span className="tag tag-sell" title="Announced acquisition: the strategy no longer buys it (see Pending deals)" style={{ marginLeft: 4 }}>PENDING DEAL</span>}</td>
                       <td>{t.comp_rank}</td>
                       <td>{t.retry_day}/{cfg.entry_max_retry_days}</td>
                       <td>{num(t.s_close)}</td>
@@ -576,6 +601,7 @@ function TicketsSection({ open, cfg }: { open: Ticket[]; cfg: Awaited<ReturnType
               <div key={t.id} className="row panel">
                 <span className="tag tag-buy">BUY</span><b style={{ minWidth: 60 }}>{t.ticker}</b>
                 {t.earnings_unchecked && <span className="tag tag-sell">EARNINGS UNCHECKED</span>}
+                {deals.has(t.ticker) && <span className="tag tag-sell">PENDING DEAL</span>}
                 <form action={fillTicket} className="row">
                   <input type="hidden" name="id" value={t.id} />
                   <label>Avg fill F<input name="price" inputMode="decimal" style={{ width: 90 }} /></label>
