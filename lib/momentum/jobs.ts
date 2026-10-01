@@ -250,6 +250,7 @@ export async function momentumBuild(t?: string) {
   const { data, error } = await db().rpc("ss_mom_build", { p_t: latest, p_kind: kind, p_cfg: cfg, p_n: N, p_held: await heldTickers(), p_dry: false });
   if (error) throw new Error(`ss_mom_build: ${error.message}`);
   const sectors = await storeSnapshotSectors(latest);
+  const pendingDeals = await applyPendingDeals(latest);
   const { regime, m, spyVol } = await marketState(latest, cal, cfg);
   // Buy safety: data-quality gate (no new buy tickets) and earnings check (tickets flagged).
   const built = data as { funnel: { count: number }[]; warnings: string[]; universe: number; hold_cutoff: number; hold_cutoff_classic: number };
@@ -281,8 +282,26 @@ export async function momentumBuild(t?: string) {
   return {
     signalDate: latest, kind, N, tradeDay, regime: { riskOn: regime.riskOn, prior: regime.prior, close: regime.close, sma: regime.sma },
     m, spyVol, holdCutoff: built.hold_cutoff, stops, calls, exits, advanced, tickets, callIdeas, equity, sectors,
-    funnel: built.funnel, warnings, quality, washBlocked: Object.fromEntries(wash),
+    funnel: built.funnel, warnings, quality, washBlocked: Object.fromEntries(wash), pendingDeals,
   };
+}
+
+/** Open pending deals (announced on or before t): no entry and no hold, with the reason. */
+async function openDeals(t: string) {
+  const { data } = await db().from("ss_pending_deals").select("ticker, opened_d").eq("status", "open").lte("opened_d", t);
+  return new Map((data ?? []).map((x) => [x.ticker as string, x.opened_d as string]));
+}
+
+const dealReason = (d: string) => `Pending acquisition (deal announced ${d})`;
+
+/** Mark the snapshot rows of tickers with an open pending deal as failing entry and hold. */
+async function applyPendingDeals(t: string) {
+  const deals = await openDeals(t);
+  for (const [ticker, d] of deals) {
+    await db().from("ss_mom_snapshots").update({ entry_ok: false, hold_ok: false, entry_reason: dealReason(d), hold_reason: dealReason(d) })
+      .eq("signal_date", t).eq("ticker", ticker);
+  }
+  return [...deals.keys()];
 }
 
 type DryRow = Candidate & {
@@ -302,7 +321,9 @@ export async function momentumDryRun(t: string) {
   const { data, error } = await db().rpc("ss_mom_build", { p_t: t, p_kind: kind, p_cfg: cfg, p_n: N, p_held: await heldTickers(), p_dry: true });
   if (error) throw new Error(`ss_mom_build (dry): ${error.message}`);
   const built = data as { rows: Omit<DryRow, "sector">[]; universe: number; hold_cutoff: number; hold_cutoff_classic: number; funnel: unknown };
-  const rows = (await withSectors((built.rows ?? []).map((r) => ({ ...r, sigma63: (r as unknown as { sigma63: number }).sigma63 })))) as DryRow[];
+  const deals = await openDeals(t);
+  const rows = ((await withSectors((built.rows ?? []).map((r) => ({ ...r, sigma63: (r as unknown as { sigma63: number }).sigma63 })))) as DryRow[])
+    .map((r) => (deals.has(r.ticker) ? { ...r, entry_ok: false, hold_ok: false, entry_reason: dealReason(deals.get(r.ticker)!), hold_reason: dealReason(deals.get(r.ticker)!) } : r));
   const { regime, m, spyVol } = await marketState(t, cal, cfg);
   const wash = washBlocked(await closedLots(), t, cfg.wash_sale_block_days);
   const [held, earnings, busy] = await Promise.all([occupied({ signal_date: t, kind }), earningsWithin(cal, t, cfg), ownedOrSelling()]);
