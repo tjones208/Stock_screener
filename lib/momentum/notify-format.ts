@@ -28,8 +28,8 @@ export function gtcLines(lots: { ticker: string; disaster_stop: number; disaster
 }
 
 /** Volatility-brake line: m and what it does today. */
-export function volLine(m: number, trimBelow: number) {
-  if (m >= 0.999) return null;
+export function volLine(m: number, trimBelow: number): string {
+  if (m >= 0.999) return "Volatility brake m = 1.00: full-size targets.";
   return `Volatility brake m = ${m.toFixed(2)}: new buys at ${Math.round(m * 100)}% of target${m < trimBelow ? "; trims on weekly / month-end signals" : ""}.`;
 }
 

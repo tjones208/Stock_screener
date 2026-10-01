@@ -594,7 +594,7 @@ test("8. volatility brake: m = clamp(0.18 / SPY vol, 0.25, 1); targets scale; tr
   assert.deepEqual([o.trigger, o.shares, o.urgent], [9, 10, false]);
   assert.equal(reviewPosition({ ...p, volTarget: null }, { monthEnd: false, riskOn: true, cfg: MOM_DEFAULTS }), null);
   assert.equal(TRIGGER_LABEL_9(), "Volatility brake");
-  assert.equal(volLine(1, 0.6), null);
+  assert.equal(volLine(1, 0.6), "Volatility brake m = 1.00: full-size targets.");
   assert.match(volLine(0.5, 0.6)!, /m = 0\.50: new buys at 50% of target; trims/);
 });
 import { TRIGGER_LABEL } from "./stops.ts";

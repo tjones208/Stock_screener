@@ -32,7 +32,7 @@ export async function momentumMorningPush() {
     db().from("ss_mom_lots").select("ticker, shares, disaster_stop, disaster_posted").is("exit_date", null),
   ]);
   const m = (run?.regime as { volScale?: number } | null)?.volScale ?? 1;
-  const notes = [volLine(m, cfg.vol_trim_trigger), ...gtcLines(lotRows ?? [])].filter((x): x is string => !!x);
+  const notes = [volLine(m, cfg.vol_trim_trigger), ...gtcLines(lotRows ?? [])];
   // Month-end session: kill switch and idle cash.
   if (run?.kind === "monthly") {
     const j = await journal(run.signal_date as string);
