@@ -4,7 +4,11 @@ import { db } from "../db";
 import { nyToday } from "../dates";
 import { pushAll } from "../push";
 import { loadCalendar } from "./jobs";
-import { earningsWarning, formatSellPush, type SellLine } from "./notify-format";
+import { capitalAndSlots } from "./config";
+import { getMomConfig } from "./jobs";
+import { journal } from "./equity";
+import { idleCash } from "./journal";
+import { earningsWarning, formatSellPush, formatUrgentPush, isUrgentAlertTime, gtcLines, monthEndLines, volLine, type SellLine } from "./notify-format";
 
 export async function momentumMorningPush() {
   const today = nyToday();
@@ -21,14 +25,40 @@ export async function momentumMorningPush() {
   const [{ count: unchecked }, { data: run }] = await Promise.all([
     db().from("ss_mom_tickets").select("id", { count: "exact", head: true })
       .eq("side", "buy").eq("status", "open").eq("earnings_unchecked", true).lte("trade_date", today),
-    db().from("ss_mom_runs").select("quality").order("signal_date", { ascending: false }).order("created_at", { ascending: false }).limit(1).maybeSingle(),
+    db().from("ss_mom_runs").select("signal_date, kind, quality, regime").order("signal_date", { ascending: false }).order("created_at", { ascending: false }).limit(1).maybeSingle(),
   ]);
+  const [cfg, { data: lotRows }] = await Promise.all([
+    getMomConfig(),
+    db().from("ss_mom_lots").select("ticker, shares, disaster_stop, disaster_posted").is("exit_date", null),
+  ]);
+  const m = (run?.regime as { volScale?: number } | null)?.volScale ?? 1;
+  const notes = [volLine(m, cfg.vol_trim_trigger), ...gtcLines(lotRows ?? [])].filter((x): x is string => !!x);
+  // Month-end session: kill switch and idle cash.
+  if (run?.kind === "monthly") {
+    const j = await journal(run.signal_date as string);
+    const { I } = capitalAndSlots(cfg);
+    const last = j.rows.at(-1);
+    notes.push(...monthEndLines({ kill: j.kill, idle: idleCash(last?.open_value ?? 0, I), cashEtf: cfg.cash_etf }));
+  }
   const q = run?.quality as { gate_ok?: boolean; gate_reasons?: string[] } | null;
   const warnings = [
     earningsWarning(unchecked ?? 0),
     q && q.gate_ok === false ? `⚠ New buys blocked: ${(q.gate_reasons ?? []).join("; ")}` : null,
   ].filter((x): x is string => !!x);
-  const msg = formatSellPush(today, (sells ?? []) as SellLine[], lots ?? 0, assigned ?? [], warnings);
+  const msg = formatSellPush(today, (sells ?? []) as SellLine[], lots ?? 0, assigned ?? [], warnings, notes);
   const sent = await pushAll(msg.title, msg.body, "/momentum");
   return { ...msg, sent };
+}
+
+/** 10:30 ET on trading days: push the urgent sells that are still open (none → no push). */
+export async function momentumUrgentPush(now = new Date()) {
+  if (!isUrgentAlertTime(now)) return { skipped: "not 10:30 ET" };
+  const today = nyToday();
+  const cal = await loadCalendar();
+  if (cal.holidays.has(today)) return { skipped: "market closed" };
+  const { data: sells } = await db().from("ss_mom_tickets").select("ticker, shares_to_sell, exit_trigger, urgent, deadline, note")
+    .eq("side", "sell").eq("status", "open").eq("urgent", true).lte("trade_date", today).order("ticker");
+  const msg = formatUrgentPush((sells ?? []) as SellLine[]);
+  if (!msg) return { urgent: 0 };
+  return { ...msg, sent: await pushAll(msg.title, msg.body, "/momentum") };
 }

@@ -5,7 +5,8 @@ import { fundamentalsBatch } from "@/lib/jobs";
 export const maxDuration = 60;
 export const dynamic = "force-dynamic";
 
-// Called every minute by pg_cron: 2 tickers × 2 Massive calls stays under 5 calls/min.
+// Called every minute by pg_cron: 1 ticker × 3 Massive calls (details, income statements, balance
+// sheet) stays under 5 calls/min and inside the 60 s limit.
 // Waits while the history backfill is running so the two don't fight over the rate limit.
 export const GET = cronRoute("fundamentals", async () => {
   const { count } = await db().from("ss_loaded_days").select("d", { count: "exact", head: true });
@@ -16,5 +17,5 @@ export const GET = cronRoute("fundamentals", async () => {
   const { count: busy } = await db().from("ss_job_runs").select("id", { count: "exact", head: true })
     .in("job", ["backfill", "momentum"]).is("finished_at", null).gte("started_at", new Date(Date.now() - 6 * 60_000).toISOString());
   if (busy) return { skipped: "momentum upkeep running" };
-  return fundamentalsBatch(2);
+  return fundamentalsBatch(1);
 });

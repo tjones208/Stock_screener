@@ -1,6 +1,6 @@
 // Rule check for positions you add by hand (pure, tested). Adding is always allowed; these are the
 // warnings shown before you confirm and stored as the lot's rule-break note.
-import type { MomConfig } from "./config.ts";
+import { riskBudget, type MomConfig } from "./config.ts";
 
 export type ManualCheck = {
   holding: boolean;          // adding shares to a stock you already hold
@@ -19,6 +19,7 @@ export type ManualCheck = {
   D: number;                 // stop distance for the new lot
   target: number | null;     // T for this ticker with it in the portfolio
   valueBefore: number;       // current value of the holding (0 for a new stock)
+  washSaleSince?: string | null; // date it was last sold at a loss, within the wash-sale block
 };
 
 export function manualWarnings(c: ManualCheck, cfg: MomConfig): string[] {
@@ -36,8 +37,12 @@ export function manualWarnings(c: ManualCheck, cfg: MomConfig): string[] {
   if (c.sectorDollarsAfter > cfg.sector_max_pct_of_I * c.I + 1e-6) {
     w.push(`Sector ${c.sector} would be ${$(c.sectorDollarsAfter)}, over ${Math.round(cfg.sector_max_pct_of_I * 100)}% of investable (${$(cfg.sector_max_pct_of_I * c.I)}).`);
   }
-  const risk = c.shares * c.D, cap = cfg.max_risk_pct_of_E * cfg.E;
-  if (risk > cap + 1e-6) w.push(`Risk to the stop is ${$(risk)}, over the ${(cfg.max_risk_pct_of_E * 100).toFixed(1)}% of equity limit (${$(cap)}).`);
+  if (c.washSaleSince) {
+    w.push(`Wash sale: sold at a loss on ${c.washSaleSince}; buying within ${cfg.wash_sale_block_days} days disallows that loss for taxes.`);
+  }
+  const risk = c.shares * c.D, cap = riskBudget(cfg);
+  const basis = cfg.risk_basis === "E" ? `${(cfg.max_risk_pct_of_E * 100).toFixed(1)}% of equity` : `${(cfg.max_risk_pct_of_B * 100).toFixed(1)}% of buying power`;
+  if (risk > cap + 1e-6) w.push(`Risk to the stop is ${$(risk)}, over the ${basis} limit (${$(cap)}).`);
   const after = c.valueBefore + c.shares * c.price;
   if (c.target != null && after > c.target + c.price) {
     w.push(`${c.holding ? "Takes the position" : "Position"} to ${$(after)}, over its target of ${$(c.target)}.`);

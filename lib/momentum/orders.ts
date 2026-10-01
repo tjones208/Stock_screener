@@ -1,6 +1,6 @@
 // Order-ticket math (spec 7 execution, 8 exit prices, record-fill). Pure; used by jobs, page and tests.
 import type { MomConfig } from "./config.ts";
-import { entryCap, positionShares, round2, stopDistance } from "./sizing.ts";
+import { positionShares, round2, stopDistance } from "./sizing.ts";
 
 /**
  * Buy limits from the 09:45 quote: LP1 = min(mid + ¼ spread, Cap), LP2 = min(ask, Cap).
@@ -38,8 +38,9 @@ export type TicketState = {
 
 /**
  * Carry an unfilled buy ticket into the next session. On retry day `entry_retry_reset_day` the entry
- * test is re-run on the latest close: pass → S resets to that close (new cap); fail → drop (the next
- * alternate takes the slot). After `entry_max_retry_days` sessions unfilled → drop.
+ * test is re-run on the latest close: fail, or a close above the original cap → drop (the next
+ * alternate takes the slot); otherwise keep the original S and cap (never reset upward). After
+ * `entry_max_retry_days` sessions unfilled → drop.
  */
 export function advanceTicket(
   t: TicketState,
@@ -54,7 +55,10 @@ export function advanceTicket(
   }
   if (day === cfg.entry_retry_reset_day) {
     if (!latest?.entry_ok) return { ...t, status: "dropped", note: `Failed the entry re-check on retry day ${day}`, promote: true };
-    return { ...t, retry_day: day, trade_date: tradeDay, s_close: latest.close, cap: entryCap(latest.close, cfg), note: `S reset to ${latest.close.toFixed(2)} on retry day ${day}`, promote: false };
+    if (latest.close > t.cap) {
+      return { ...t, status: "dropped", note: `Closed ${latest.close.toFixed(2)} above the cap ${t.cap.toFixed(2)} on retry day ${day}: not chasing it`, promote: true };
+    }
+    return { ...t, retry_day: day, trade_date: tradeDay, note: `Still under the cap on retry day ${day}; S and cap unchanged`, promote: false };
   }
   return { ...t, retry_day: day, trade_date: tradeDay, promote: false };
 }

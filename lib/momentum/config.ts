@@ -1,6 +1,16 @@
 // Momentum strategy settings (spec section 1). Every rule parameter lives here; nothing is hard-coded
 // elsewhere. Stored in ss_settings under "momentum" and merged over these defaults.
 
+export type RankMethod = "classic" | "risk_adj";
+export type RiskBasis = "B" | "E";
+
+/** Text settings and their allowed values (anything else falls back to the default). */
+export const MOM_CHOICES: Partial<Record<string, readonly string[] | "text">> = {
+  rank_method: ["risk_adj", "classic"],
+  risk_basis: ["B", "E"],
+  cash_etf: "text",
+};
+
 export const MOM_DEFAULTS = {
   B: 20_000, // strategy buying power, changes often
   E: 120_000, // total account equity (risk cap only)
@@ -20,8 +30,12 @@ export const MOM_DEFAULTS = {
   entry_max_days_since_high: 63,
   hold_mom_pct: 50,
   hold_h52: 0.8,
-  hold_comprank_mult: 2, // keep if CompRank <= 2*N
+  hold_comprank_mult: 2, // keep if CompRank <= max(2*N, hold_rank_pct × universe)
+  hold_rank_pct: 0.2,    // hold buffer: also keep while in the top 20% of the universe
+  rank_method: "risk_adj" as RankMethod, // "risk_adj": 0.75 × pct(mom / σ252) + 0.25 × H52 pct; "classic": 50/50 mom / H52
+  abs_mom_min: 0,        // entry also needs 12-1 momentum above this (absolute momentum)
   regime_sma_months: 10,
+  regime_band_pct: 0.02, // from risk-on, go risk-off only below SMA × (1 − band)
   vol_lookback: 63,
   weight_floor_mult: 0.5, // 0.5/n
   weight_cap_mult: 1.5, // 1.5/n
@@ -31,6 +45,8 @@ export const MOM_DEFAULTS = {
   stop_max_pct: 0.2,
   disaster_stop_extra: 0.5, // disaster stop = Stop_t - 0.5*D
   max_risk_pct_of_E: 0.005,
+  risk_basis: "B" as RiskBasis, // which capital the per-position risk cap uses
+  max_risk_pct_of_B: 0.015,
   sector_max_names: 4,
   sector_max_pct_of_I: 0.3,
   chase_cap_pct: 0.03,
@@ -40,6 +56,15 @@ export const MOM_DEFAULTS = {
   earnings_blackout_days: 5,
   lt_tax_window_days: 30, // calendar days
   wash_sale_block_days: 31, // calendar days
+  tax_rate_st: 0.3,
+  tax_rate_lt: 0.15,
+  // Volatility brake (between month-ends): m = clamp(vol_target / SPY 21-day realized vol, floor, 1).
+  vol_scale: true,
+  vol_target: 0.18,
+  vol_lookback_days: 21,
+  vol_scale_floor: 0.25,
+  vol_trim_trigger: 0.6,
+  cash_etf: "SGOV" as string, // idle cash suggestion when invested < 50% of I
   alternates: 5,
   entry_retry_reset_day: 3,
   entry_max_retry_days: 5,
@@ -48,7 +73,7 @@ export const MOM_DEFAULTS = {
   // Covered calls (not in the original spec): sold in your broker on positions already holding
   // 100+ shares, far out of the money (delta guidance below), expiring before the next month-end
   // rebalance and before earnings.
-  covered_calls: true,
+  covered_calls: false,
   call_delta_min: 0.15,
   call_delta_max: 0.2,
   call_min_dte: 5,
@@ -83,10 +108,16 @@ export const MOM_FIELDS: { key: MomKey; label: string; group: string }[] = [
   { key: "hold_mom_pct", label: "Hold: min momentum percentile", group: "Signals" },
   { key: "hold_h52", label: "Hold: min H52", group: "Signals" },
   { key: "hold_comprank_mult", label: "Hold: CompRank ≤ this × N", group: "Signals" },
+  { key: "hold_rank_pct", label: "Hold buffer: or CompRank in the top (fraction of universe)", group: "Signals" },
+  { key: "rank_method", label: "Ranking (risk_adj or classic)", group: "Signals" },
+  { key: "abs_mom_min", label: "Entry: 12-1 momentum above (fraction)", group: "Signals" },
   { key: "regime_sma_months", label: "Regime SMA (months)", group: "Signals" },
+  { key: "regime_band_pct", label: "Regime band (fraction below SMA to go risk-off)", group: "Signals" },
   { key: "vol_lookback", label: "Volatility lookback (days)", group: "Sizing" },
   { key: "weight_floor_mult", label: "Weight floor (× 1/n)", group: "Sizing" },
   { key: "weight_cap_mult", label: "Weight cap (× 1/n)", group: "Sizing" },
+  { key: "risk_basis", label: "Risk cap basis (B or E)", group: "Sizing" },
+  { key: "max_risk_pct_of_B", label: "Max risk per position (fraction of B)", group: "Sizing" },
   { key: "max_risk_pct_of_E", label: "Max risk per position (fraction of E)", group: "Sizing" },
   { key: "sector_max_names", label: "Max names per sector", group: "Sizing" },
   { key: "sector_max_pct_of_I", label: "Max sector $ (fraction of I)", group: "Sizing" },
@@ -105,6 +136,14 @@ export const MOM_FIELDS: { key: MomKey; label: string; group: string }[] = [
   { key: "earnings_blackout_days", label: "Earnings blackout (trading days)", group: "Orders" },
   { key: "lt_tax_window_days", label: "Long-term tax window (calendar days)", group: "Tax" },
   { key: "wash_sale_block_days", label: "Wash-sale block (calendar days)", group: "Tax" },
+  { key: "tax_rate_st", label: "Short-term tax rate (for after-tax returns)", group: "Tax" },
+  { key: "tax_rate_lt", label: "Long-term tax rate (for after-tax returns)", group: "Tax" },
+  { key: "vol_scale", label: "Volatility brake on", group: "Volatility brake" },
+  { key: "vol_target", label: "Target SPY volatility (annualized)", group: "Volatility brake" },
+  { key: "vol_lookback_days", label: "SPY realized-vol lookback (days)", group: "Volatility brake" },
+  { key: "vol_scale_floor", label: "Minimum scale m", group: "Volatility brake" },
+  { key: "vol_trim_trigger", label: "Trim positions when m is below (weekly / monthly)", group: "Volatility brake" },
+  { key: "cash_etf", label: "Idle-cash ETF", group: "Account" },
   { key: "min_B_stock_version", label: "Min B for the stock version ($)", group: "Account" },
   { key: "gate_max_universe_change_pct", label: "Block buys if universe changes more than (fraction)", group: "Data-quality gate" },
   { key: "gate_max_missing_market_caps", label: "Block buys if liquid names missing a market cap exceed", group: "Data-quality gate" },
@@ -121,7 +160,11 @@ export function normalizeMomConfig(input: Partial<Record<string, unknown>> | nul
   for (const k of Object.keys(MOM_DEFAULTS) as MomKey[]) {
     const v = input?.[k];
     if (v === undefined || v === null || v === "") continue;
-    if (typeof MOM_DEFAULTS[k] === "boolean") {
+    const choice = MOM_CHOICES[k];
+    if (choice) {
+      const t = String(v).trim();
+      if (choice === "text" ? /^[A-Za-z.]{1,10}$/.test(t) : choice.includes(t)) (out as Record<MomKey, unknown>)[k] = choice === "text" ? t.toUpperCase() : t;
+    } else if (typeof MOM_DEFAULTS[k] === "boolean") {
       (out as Record<MomKey, unknown>)[k] = v === true || v === "true" || v === "1" || v === "on";
     } else {
       const n = Number(v);
@@ -132,6 +175,10 @@ export function normalizeMomConfig(input: Partial<Record<string, unknown>> | nul
 }
 
 /** Investable capital I and target position count N (spec 6.1–6.2). */
+/** Per-position risk budget in dollars: max_risk_pct_of_B × B or max_risk_pct_of_E × E. */
+export const riskBudget = (c: Pick<MomConfig, "risk_basis" | "B" | "E" | "max_risk_pct_of_B" | "max_risk_pct_of_E">) =>
+  c.risk_basis === "E" ? c.max_risk_pct_of_E * c.E : c.max_risk_pct_of_B * c.B;
+
 export function capitalAndSlots(c: Pick<MomConfig, "B" | "cash_reserve_pct" | "p_min" | "n_min" | "n_max">) {
   const I = c.B * (1 - c.cash_reserve_pct);
   const N = Math.min(c.n_max, Math.max(c.n_min, Math.floor(I / c.p_min)));

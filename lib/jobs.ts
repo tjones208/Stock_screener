@@ -1,6 +1,7 @@
 import "server-only";
 import { db, fetchAll, upsertChunks } from "./db";
-import { dailyRange, financials, groupedDaily, listTickers, tickerDetails, type FinancialReport } from "./massive";
+import { sum4, tickerPatch } from "./fundamentals-calc";
+import { balanceSheet, dailyRange, groupedDaily, incomeStatements, listTickers, tickerDetails, type BalanceSheet, type IncomeStatement } from "./massive";
 import { evaluateRules, type AlertRule } from "./alerts";
 import { cleanFilters, dbConditions, type Filters, type ScreenerRow } from "./screen";
 import { pushAll } from "./push";
@@ -276,69 +277,86 @@ export async function runAlerts() {
 
 // ───────────── Fundamentals (rolling, 5 calls/min) ─────────────
 
-const val = (x: { value?: number } | undefined) => (x?.value == null ? null : x.value);
-const sum4 = (reports: FinancialReport[], stmt: "income_statement" | "cash_flow_statement", key: string) => {
-  const vals = reports.slice(0, 4).map((r) => val(r.financials?.[stmt]?.[key]));
-  return vals.length === 4 && vals.every((v) => v != null) ? (vals as number[]).reduce((a, b) => a + b, 0) : null;
-};
 const ratio = (a: number | null, b: number | null, pct = false) =>
   a == null || b == null || b === 0 ? null : (a / b) * (pct ? 100 : 1);
 
-export async function fundamentalsBatch(count = 2) {
+/**
+ * One ticker per call: ticker details (market cap, shares, SIC) first and saved on its own, then the
+ * income statements and balance sheet. A statements failure is logged in the result (→ ss_job_runs)
+ * and never touches the market cap; a missing market cap never overwrites a stored one.
+ */
+export async function fundamentalsBatch(count = 1) {
   const { data: queue } = await db().from("ss_fundamentals_queue").select("ticker").limit(count);
   const done: string[] = [];
+  const errors: { ticker: string; step: string; error: string }[] = [];
   for (const { ticker } of queue ?? []) {
-    const [details, reports] = [await tickerDetails(ticker), await financials(ticker)];
-    const { data: ind } = await db().from("ss_indicators").select("close").eq("ticker", ticker).maybeSingle();
+    let details: Awaited<ReturnType<typeof tickerDetails>> = null;
+    try {
+      details = await tickerDetails(ticker);
+    } catch (e) {
+      errors.push({ ticker, step: "details", error: String(e).slice(0, 300) });
+    }
+    if (details) {
+      await db().from("ss_tickers").update({ ...tickerPatch(details), updated_at: new Date().toISOString() }).eq("ticker", ticker);
+      // Non-S&P names take their sector from SIC (recomputed each fetch so mapping fixes apply);
+      // S&P names keep their GICS sector and industry.
+      await db().from("ss_tickers")
+        .update({ sector: sectorFromSic(details.sic_code), industry: details.sic_description ?? null })
+        .eq("ticker", ticker).eq("in_sp500", false);
+    }
+
+    let inc: IncomeStatement[] = [];
+    let bs: BalanceSheet | null = null;
+    try {
+      inc = await incomeStatements(ticker);
+      bs = await balanceSheet(ticker);
+    } catch (e) {
+      errors.push({ ticker, step: "financials", error: String(e).slice(0, 300) });
+    }
+    const [{ data: ind }, { data: tk }] = await Promise.all([
+      db().from("ss_indicators").select("close").eq("ticker", ticker).maybeSingle(),
+      db().from("ss_tickers").select("market_cap").eq("ticker", ticker).maybeSingle(),
+    ]);
     const close = ind?.close ?? null;
+    const marketCap = (tk?.market_cap as number | null | undefined) ?? null;
+    const q0 = inc[0];
+    const revenue = sum4(inc, "revenue");
+    const netIncome = sum4(inc, "net_income_loss_attributable_common_shareholders") ?? sum4(inc, "consolidated_net_income_loss");
+    const gross = sum4(inc, "gross_profit");
+    const opInc = sum4(inc, "operating_income");
+    const eps = sum4(inc, "diluted_earnings_per_share") ?? sum4(inc, "basic_earnings_per_share");
+    const equity = bs?.total_equity_attributable_to_parent ?? bs?.total_equity ?? null;
+    const liabilities = bs?.total_liabilities ?? null;
+    const revQ0 = q0?.revenue ?? null;
+    const revQ4 = inc[4]?.revenue ?? null;
 
-    const q0 = reports[0];
-    const bs = q0?.financials?.balance_sheet;
-    const revenue = sum4(reports, "income_statement", "revenues");
-    const netIncome = sum4(reports, "income_statement", "net_income_loss");
-    const gross = sum4(reports, "income_statement", "gross_profit");
-    const opInc = sum4(reports, "income_statement", "operating_income_loss");
-    const eps = sum4(reports, "income_statement", "diluted_earnings_per_share") ?? sum4(reports, "income_statement", "basic_earnings_per_share");
-    const equity = val(bs?.equity_attributable_to_parent) ?? val(bs?.equity);
-    const liabilities = val(bs?.liabilities);
-    const revQ0 = val(q0?.financials?.income_statement?.revenues);
-    const revQ4 = val(reports[4]?.financials?.income_statement?.revenues);
-    const marketCap = details?.market_cap ?? null;
-
-    await db().from("ss_tickers").update({
-      market_cap: marketCap,
-      shares_out: details?.weighted_shares_outstanding ?? details?.share_class_shares_outstanding ?? null,
-      sic_code: details?.sic_code ?? null,
-      composite_figi: details?.composite_figi ?? null,
-      updated_at: new Date().toISOString(),
-    }).eq("ticker", ticker);
-    // Non-S&P names take their sector from SIC (recomputed each fetch so mapping fixes apply);
-    // S&P names keep their GICS sector and industry.
-    await db().from("ss_tickers")
-      .update({ sector: sectorFromSic(details?.sic_code), industry: details?.sic_description ?? null })
-      .eq("ticker", ticker).eq("in_sp500", false);
-
-    await db().from("ss_fundamentals").upsert({
-      ticker,
-      period_end: q0?.end_date ?? null,
-      fiscal_period: q0 ? `${q0.fiscal_period ?? ""} ${q0.fiscal_year ?? ""}`.trim() : null,
-      revenue_ttm: revenue,
-      revenue_growth_yoy: revQ0 != null && revQ4 ? ((revQ0 - revQ4) / Math.abs(revQ4)) * 100 : null,
-      net_income_ttm: netIncome,
-      eps_ttm: eps,
-      pe: close != null && eps != null && eps > 0 ? close / eps : null,
-      ps: ratio(marketCap, revenue),
-      pb: equity != null && equity > 0 ? ratio(marketCap, equity) : null,
-      gross_margin: ratio(gross, revenue, true),
-      operating_margin: ratio(opInc, revenue, true),
-      net_margin: ratio(netIncome, revenue, true),
-      roe: equity != null && equity > 0 ? ratio(netIncome, equity, true) : null,
-      debt_to_equity: equity != null && equity > 0 ? ratio(liabilities, equity) : null,
-      current_ratio: ratio(val(bs?.current_assets), val(bs?.current_liabilities)),
-      raw: { details, latest: q0 ?? null },
-      fetched_at: new Date().toISOString(),
-    }, { onConflict: "ticker" });
+    // Statements unavailable: keep the old fundamentals row rather than blanking it.
+    if (inc.length || bs) {
+      await db().from("ss_fundamentals").upsert({
+        ticker,
+        period_end: q0?.period_end ?? null,
+        fiscal_period: q0 ? `Q${q0.fiscal_quarter ?? ""} ${q0.fiscal_year ?? ""}`.trim() : null,
+        revenue_ttm: revenue,
+        revenue_growth_yoy: revQ0 != null && revQ4 ? ((revQ0 - revQ4) / Math.abs(revQ4)) * 100 : null,
+        net_income_ttm: netIncome,
+        eps_ttm: eps,
+        pe: close != null && eps != null && eps > 0 ? close / eps : null,
+        ps: ratio(marketCap, revenue),
+        pb: equity != null && equity > 0 ? ratio(marketCap, equity) : null,
+        gross_margin: ratio(gross, revenue, true),
+        operating_margin: ratio(opInc, revenue, true),
+        net_margin: ratio(netIncome, revenue, true),
+        roe: equity != null && equity > 0 ? ratio(netIncome, equity, true) : null,
+        debt_to_equity: equity != null && equity > 0 ? ratio(liabilities, equity) : null,
+        current_ratio: ratio(bs?.total_current_assets ?? null, bs?.total_current_liabilities ?? null),
+        raw: { details, latest: q0 ?? null, balance: bs },
+        fetched_at: new Date().toISOString(),
+      }, { onConflict: "ticker" });
+    } else {
+      // Still mark it fetched so the queue moves on; the next pass retries it.
+      await db().from("ss_fundamentals").upsert({ ticker, raw: { details, error: errors.at(-1)?.error ?? null }, fetched_at: new Date().toISOString() }, { onConflict: "ticker", ignoreDuplicates: false });
+    }
     done.push(ticker);
   }
-  return { fetched: done };
+  return { fetched: done, ...(errors.length ? { errors } : {}) };
 }

@@ -98,7 +98,8 @@ test("sizing worked example (spec 13)", () => {
   assert.equal(round2(D), 9.3);
   assert.equal(round2(85.46 - D), 76.16); // Stop0
   assert.equal(round2(85.46 - D - cfg.disaster_stop_extra * D), 71.51); // disaster stop
-  const s = positionShares(round2(T0), 85.46, round2(D), cfg);
+  // The spec's example caps risk at 0.5% of E; the default basis is now 1.5% of B.
+  const s = positionShares(round2(T0), 85.46, round2(D), { ...cfg, risk_basis: "E" });
   assert.deepEqual([s.byTarget, s.byRisk, s.shares, s.tooSmall], [18, 64, 18, false]);
 });
 
@@ -190,13 +191,18 @@ test("fill levels: D fixed from ATR at signal, Stop0, disaster stop, long-term d
   assert.equal(fillLevels(100, 10, "2026-10-01", MOM_DEFAULTS).D, 20);
 });
 
-test("ticket retries: same cap, day-3 reset or drop, drop after 5 sessions", () => {
+test("ticket retries: same cap, day-3 keep or drop (never reset upward), drop after 5 sessions", () => {
   const cfg = MOM_DEFAULTS;
   const t0: TicketState = { status: "open", retry_day: 1, trade_date: "2026-10-01", s_close: 50, cap: 51.5 };
   const d2 = advanceTicket(t0, "2026-10-02", { entry_ok: true, close: 55 }, cfg);
   assert.deepEqual([d2.retry_day, d2.cap, d2.trade_date, d2.promote], [2, 51.5, "2026-10-02", false]);
-  const d3 = advanceTicket(d2, "2026-10-05", { entry_ok: true, close: 55 }, cfg);
-  assert.deepEqual([d3.retry_day, d3.s_close, d3.cap, d3.status], [3, 55, 56.65, "open"]);
+  // Day 3, close at or under the original cap: keep the original S and cap.
+  const d3 = advanceTicket(d2, "2026-10-05", { entry_ok: true, close: 51.5 }, cfg);
+  assert.deepEqual([d3.retry_day, d3.s_close, d3.cap, d3.status, d3.promote], [3, 50, 51.5, "open", false]);
+  // Day 3, close above the original cap: drop and promote the next alternate.
+  const up3 = advanceTicket(d2, "2026-10-05", { entry_ok: true, close: 55 }, cfg);
+  assert.deepEqual([up3.status, up3.promote, up3.s_close, up3.cap], ["dropped", true, 50, 51.5]);
+  assert.match(up3.note!, /above the cap 51\.50/);
   const fail3 = advanceTicket(d2, "2026-10-05", { entry_ok: false, close: 55 }, cfg);
   assert.deepEqual([fail3.status, fail3.promote], ["dropped", true]);
   const d5: TicketState = { ...d3, retry_day: 5, trade_date: "2026-10-07" };
@@ -447,3 +453,277 @@ test("morning push leads with the earnings-unchecked warning", () => {
   assert.equal(m.body, `${w}\nNo open positions.`);
   assert.equal(earningsWarning(1), "⚠ Earnings unchecked: 1 buy order today wasn't screened for earnings — check each before buying");
 });
+
+// ───────────── Part B ─────────────
+import { nightlyStop, gtcNeedsUpdate, applyLtDeferral, dueDeferrals, ltWindow, type ExitOrder } from "./stops.ts";
+import { regimeState } from "./regime.ts";
+import { realizedVol, volScale, washBlocked, isWashBuy } from "./risk.ts";
+import { holdCutoff, rankUniverse, entryOk, holdVerdict, type RuleRow } from "./ranking.ts";
+import { equityRow, trailingReturn, killSwitch, tradeStats, idleCash, type EquityRow } from "./journal.ts";
+import { gtcLines, volLine, monthEndLines, isUrgentAlertTime, formatUrgentPush } from "./notify-format.ts";
+import { tickerPatch, sum4 } from "../fundamentals-calc.ts";
+
+const lotB = (o: Partial<Lot> = {}): Lot => ({ id: 1, ticker: "AAA", shares: 10, fill_price: 100, d: 10, stop: 90, filled_at: "2025-10-01T14:00:00Z", lt_date: "2026-10-02", ...o });
+
+test("1. trailing stop resizes with price: 192 → 400 stays a 10–20% trail and never moves down", () => {
+  const cfg = MOM_DEFAULTS;
+  const entry = fillLevels(192, 10.4, "2026-01-05", cfg);
+  assert.equal(entry.D, 31.2); // 3 × 10.4, inside [19.2, 38.4]
+  let stop = entry.stop0, hc = 192;
+  const path = [[210, 11], [250, 13], [240, 15], [300, 16], [360, 19], [400, 21], [380, 24]] as const;
+  for (const [close, atr] of path) {
+    hc = Math.max(hc, close);
+    const n = nightlyStop(stop, hc, close, atr, entry.D, cfg);
+    assert.ok(n.stop >= stop, `stop never moves down (${n.stop} < ${stop})`);
+    const trail = n.dTrail / close;
+    assert.ok(trail >= 0.1 - 1e-9 && trail <= 0.2 + 1e-9, `trail ${trail} within 10–20%`);
+    assert.equal(n.disaster, round2(n.stop - cfg.disaster_stop_extra * n.dTrail));
+    stop = n.stop;
+  }
+  // At $400 with ATR $21: D_t = 63 (15.75%), stop = 400 − 63 = 337, far above the fixed-$31.20 trail's percentage.
+  const at400 = nightlyStop(0, 400, 400, 21, entry.D, cfg);
+  assert.deepEqual([at400.dTrail, at400.stop], [63, 337]);
+  // lots.d stays the initial risk: the entry D is unchanged.
+  assert.equal(entry.D, 31.2);
+  // No ATR today: falls back to the entry distance.
+  assert.equal(nightlyStop(300, 400, 400, null, 31.2, cfg).dTrail, 31.2);
+});
+
+test("2. hold buffer: cutoff = max(2 × N, ceil(20% × universe))", () => {
+  assert.equal(holdCutoff(MOM_DEFAULTS, 13, 1551), 311);
+  assert.equal(holdCutoff({ ...MOM_DEFAULTS, hold_rank_pct: 0 }, 13, 1551), 26);
+  assert.equal(holdCutoff(MOM_DEFAULTS, 13, 100), 26);
+  const r: RuleRow = { mom: 0.4, mom_pct: 80, h52: 0.9, days_since_high: 5, comp_rank: 200, close: 50, median_dv60: 3e7, buyoutReview: false, inUniverse: true };
+  assert.equal(holdVerdict(r, MOM_DEFAULTS, 26).ok, false);
+  assert.equal(holdVerdict(r, MOM_DEFAULTS, 311).ok, true);
+});
+
+test("3. ranking: risk_adj = 0.75 × pct(mom/σ252) + 0.25 × H52 pct, ties by mom; classic is 50/50", () => {
+  const rows = [
+    { ticker: "HOT", mom: 1.2, h52: 0.95, sigma252: 1.2 },   // big move, very volatile: mom/σ = 1.0
+    { ticker: "STEADY", mom: 0.6, h52: 0.97, sigma252: 0.2 }, // mom/σ = 3.0
+    { ticker: "MID", mom: 0.5, h52: 0.9, sigma252: 0.25 },    // 2.0
+    { ticker: "NOSIG", mom: 0.9, h52: 0.99, sigma252: null }, // no σ252 → bottom of the risk percentile
+  ];
+  const ra = rankUniverse(rows, "risk_adj"), cl = rankUniverse(rows, "classic");
+  assert.equal(ra[0].ticker, "STEADY");
+  assert.equal(cl[0].ticker, "NOSIG");
+  const steady = ra.find((r) => r.ticker === "STEADY")!;
+  assert.ok(Math.abs(steady.risk_adj - (0.75 * 100 + 0.25 * (200 / 3))) < 1e-9);
+  // Tie on composite → higher momentum first.
+  const tie = rankUniverse([{ ticker: "A", mom: 0.3, h52: 0.9, sigma252: 0.3 }, { ticker: "B", mom: 0.6, h52: 0.9, sigma252: 0.6 }], "risk_adj");
+  assert.deepEqual(tie.map((r) => r.ticker), ["B", "A"]);
+  assert.equal(MOM_DEFAULTS.rank_method, "risk_adj");
+  assert.equal(normalizeMomConfig({ rank_method: "classic" }).rank_method, "classic");
+  assert.equal(normalizeMomConfig({ rank_method: "nonsense" }).rank_method, "risk_adj");
+});
+
+const ruleRow = (o: Partial<RuleRow> = {}): RuleRow => ({ mom: 0.4, mom_pct: 90, h52: 0.95, days_since_high: 3, comp_rank: 5, close: 50, median_dv60: 3e7, buyoutReview: false, inUniverse: true, ...o });
+
+test("4. absolute momentum: entry needs mom > abs_mom_min; hold unchanged", () => {
+  assert.equal(entryOk(ruleRow(), MOM_DEFAULTS), true);
+  assert.equal(entryOk(ruleRow({ mom: -0.02, mom_pct: 75 }), MOM_DEFAULTS), false);
+  assert.equal(entryOk(ruleRow({ mom: 0 }), MOM_DEFAULTS), false);
+  assert.equal(entryOk(ruleRow({ mom: 0.05 }), { ...MOM_DEFAULTS, abs_mom_min: 0.1 }), false);
+  assert.equal(holdVerdict(ruleRow({ mom: -0.02, mom_pct: 75 }), MOM_DEFAULTS, 26).ok, true);
+});
+
+test("5. buyout review: fails entry and hold → month-end exit 'possible pending buyout'; cleared → normal", () => {
+  const flagged = ruleRow({ buyoutReview: true });
+  assert.equal(entryOk(flagged, MOM_DEFAULTS), false);
+  const v = holdVerdict(flagged, MOM_DEFAULTS, 26);
+  assert.deepEqual(v, { ok: false, reason: "Possible pending buyout" });
+  const p: Position = { ticker: "AAA", lots: [lotB({ lt_date: "2027-12-01" })], close: 120, active: true, holdOk: v.ok, holdReason: v.reason, buyoutNews: null, target: 1000, entryOk: false };
+  const o = reviewPosition(p, { monthEnd: true, riskOn: true, cfg: MOM_DEFAULTS })!;
+  assert.equal(o.trigger, 3);
+  assert.match(o.reason, /possible pending buyout/);
+  const cleared = holdVerdict(ruleRow({ buyoutReview: false }), MOM_DEFAULTS, 26);
+  assert.equal(cleared.ok, true);
+  assert.equal(entryOk(ruleRow(), MOM_DEFAULTS), true);
+});
+
+test("6. data glitches don't force sales: held name with a missing_day flag and no market cap is kept", () => {
+  // Outside the universe (flag + null market cap) but the hold test on its bars passes.
+  const outside = ruleRow({ inUniverse: false, comp_rank: 40 });
+  const v = holdVerdict(outside, MOM_DEFAULTS, holdCutoff(MOM_DEFAULTS, 13, 1551));
+  assert.equal(v.ok, true);
+  const p: Position = { ticker: "GLCH", lots: [lotB()], close: 110, active: true, holdOk: v.ok, buyoutNews: null, target: 1100, entryOk: false };
+  assert.equal(reviewPosition(p, { monthEnd: true, riskOn: true, cfg: MOM_DEFAULTS }), null);
+  // Only real problems: price under the minimum, or liquidity under half the minimum.
+  assert.match(holdVerdict(ruleRow({ inUniverse: false, close: 8 }), MOM_DEFAULTS, 311).reason!, /Close below/);
+  assert.match(holdVerdict(ruleRow({ median_dv60: 9e6 }), MOM_DEFAULTS, 311).reason!, /half the minimum/);
+  assert.equal(holdVerdict(ruleRow({ median_dv60: 1.1e7 }), MOM_DEFAULTS, 311).ok, true);
+});
+
+test("7. regime band: risk-on stays on until SMA × 0.98; risk-off needs SMA", () => {
+  const band = MOM_DEFAULTS.regime_band_pct;
+  assert.equal(band, 0.02);
+  // From risk-on: 1% under the SMA stays on, 3% under goes off.
+  assert.equal(regimeState(99, 100, true, band), true);
+  assert.equal(regimeState(98, 100, true, band), true);
+  assert.equal(regimeState(97, 100, true, band), false);
+  // From risk-off: 1% under stays off; at the SMA goes on.
+  assert.equal(regimeState(99, 100, false, band), false);
+  assert.equal(regimeState(100, 100, false, band), true);
+  // Unknown prior: plain rule.
+  assert.equal(regimeState(99, 100, null, band), false);
+  assert.equal(regimeState(100, 100, null, band), true);
+});
+
+test("8. volatility brake: m = clamp(0.18 / SPY vol, 0.25, 1); targets scale; trims only via volTarget", () => {
+  const calm = Array.from({ length: 30 }, (_, i) => 100 * (1 + 0.002 * (i % 2 ? 1 : -1)));
+  const wild = Array.from({ length: 30 }, (_, i) => 100 * (1 + 0.04 * (i % 2 ? 1 : -1)));
+  assert.equal(volScale(calm, MOM_DEFAULTS).m, 1);
+  const w = volScale(wild, MOM_DEFAULTS);
+  assert.ok(w.vol! > 1);
+  assert.equal(w.m, 0.25); // floor
+  const mid = Array.from({ length: 30 }, (_, i) => 100 * (1 + 0.0167 * (i % 2 ? 1 : -1)));
+  const mm = volScale(mid, MOM_DEFAULTS);
+  assert.ok(Math.abs(mm.m - 0.18 / mm.vol!) < 1e-12 && mm.m > 0.25 && mm.m < 1);
+  assert.equal(volScale(wild, { ...MOM_DEFAULTS, vol_scale: false }).m, 1);
+  assert.equal(realizedVol([1, 2], 21), null);
+  // New buys and alternates use T × m.
+  const cfg = { ...MOM_DEFAULTS, B: 20_000 };
+  const cands = ["Energy", "Financials", "Utilities"].map((sector, i) => cand(`V${i}`, i + 1, { sector }));
+  const full = planPortfolio({ cfg, candidates: cands, riskOn: true });
+  const half = planPortfolio({ cfg, candidates: cands, riskOn: true, scale: 0.5 });
+  assert.ok(Math.abs(half.buys[0].T - full.buys[0].T * 0.5) < 1e-9);
+  // Brake trim (trigger 9) to m × target: non-urgent, only when volTarget is set (weekly/monthly).
+  const p: Position = { ticker: "AAA", lots: [lotB({ shares: 20, lt_date: "2027-12-01" })], close: 100, active: true, holdOk: true, buyoutNews: null, target: null, entryOk: true, volTarget: 1000 };
+  const o = reviewPosition(p, { monthEnd: false, riskOn: true, cfg: MOM_DEFAULTS })!;
+  assert.deepEqual([o.trigger, o.shares, o.urgent], [9, 10, false]);
+  assert.equal(reviewPosition({ ...p, volTarget: null }, { monthEnd: false, riskOn: true, cfg: MOM_DEFAULTS }), null);
+  assert.equal(TRIGGER_LABEL_9(), "Volatility brake");
+  assert.equal(volLine(1, 0.6), null);
+  assert.match(volLine(0.5, 0.6)!, /m = 0\.50: new buys at 50% of target; trims/);
+});
+import { TRIGGER_LABEL } from "./stops.ts";
+const TRIGGER_LABEL_9 = () => TRIGGER_LABEL[9];
+
+test("9a. wash sale: loss exits block buys for 31 days, gains never; flagged on manual add and new lots", () => {
+  const closed = [
+    { ticker: "LOSS", exit_date: "2026-09-15", pnl: -120 },
+    { ticker: "GAIN", exit_date: "2026-09-15", pnl: 300 },
+    { ticker: "OLD", exit_date: "2026-08-01", pnl: -50 },
+  ];
+  const w = washBlocked(closed, "2026-09-30", MOM_DEFAULTS.wash_sale_block_days);
+  assert.deepEqual([...w.keys()], ["LOSS"]);
+  const cfg = { ...MOM_DEFAULTS, B: 20_000 };
+  const p = planPortfolio({ cfg, candidates: [cand("LOSS", 1, { sector: "Energy" }), cand("GAIN", 2, { sector: "Utilities" })], riskOn: true, washBlocked: new Set(w.keys()) });
+  assert.deepEqual(p.buys.map((b) => b.ticker), ["GAIN"]);
+  assert.deepEqual(p.skipped, [{ ticker: "LOSS", comp_rank: 1, reason: "Wash-sale block" }]);
+  assert.equal(isWashBuy(closed, "LOSS", "2026-10-10"), true);
+  assert.equal(isWashBuy(closed, "LOSS", "2026-10-20"), false);
+  assert.equal(isWashBuy(closed, "GAIN", "2026-09-20"), false);
+  const warn = manualWarnings({ ...manualBase(), washSaleSince: "2026-09-15" }, MOM_DEFAULTS);
+  assert.ok(warn.some((x) => /Wash sale: sold at a loss on 2026-09-15/.test(x)));
+});
+
+test("9b. LT deferral: triggers 3, 7, 9 wait for lt_date on gains; 1, 2, 4, 5 never wait", () => {
+  const t = "2026-09-30";
+  const near = lotB({ id: 1, fill_price: 100, lt_date: "2026-10-20" }); // 20 days out, gain at 120
+  const far = lotB({ id: 2, fill_price: 100, lt_date: "2027-03-01" });
+  assert.equal(ltWindow(near, 120, t, MOM_DEFAULTS), true);
+  assert.equal(ltWindow(near, 95, t, MOM_DEFAULTS), false); // a loss isn't deferred
+  const hold: ExitOrder = { ticker: "AAA", trigger: 3, lots: [{ id: 1, shares: 10 }, { id: 2, shares: 10 }], shares: 20, reason: "Failed the month-end hold test.", urgent: false, deadlineDays: 0 };
+  const r = applyLtDeferral(hold, [near, far], 120, t, MOM_DEFAULTS);
+  assert.deepEqual(r.order!.lots, [{ id: 2, shares: 10 }]);
+  assert.match(r.order!.reason, /deferred for LT until 2026-10-20/);
+  assert.deepEqual(r.deferred, [{ id: 1, shares: 10, lt_date: "2026-10-20" }]);
+  for (const trigger of [1, 2, 4, 5] as const) {
+    const o = applyLtDeferral({ ...hold, trigger }, [near, far], 120, t, MOM_DEFAULTS);
+    assert.equal(o.deferred.length, 0);
+    assert.equal(o.order!.shares, 20);
+  }
+  // Only the near lot: the whole order waits.
+  assert.equal(applyLtDeferral({ ...hold, lots: [{ id: 1, shares: 10 }], shares: 10 }, [near], 120, t, MOM_DEFAULTS).order, null);
+  // Due on lt_date (or when the gain is gone).
+  const waiting = { ...near, lt_deferred_trigger: 3 };
+  assert.equal(dueDeferrals([waiting], 120, "2026-10-19").length, 0);
+  assert.equal(dueDeferrals([waiting], 120, "2026-10-20").length, 1);
+  assert.equal(dueDeferrals([waiting], 99, "2026-10-01").length, 1);
+});
+
+test("10. risk cap basis: 1.5% of B by default, or 0.5% of E", () => {
+  const cfg = { ...MOM_DEFAULTS, B: 20_000, E: 120_000 };
+  assert.equal(positionShares(5000, 50, 5, cfg).byRisk, 60);                        // $300 / $5
+  assert.equal(positionShares(5000, 50, 5, { ...cfg, risk_basis: "E" }).byRisk, 120); // $600 / $5
+  const w = manualWarnings({ ...manualBase(), shares: 70, D: 5 }, cfg);
+  assert.ok(w.some((x) => /1\.5% of buying power limit \(\$300\)/.test(x)));
+  assert.equal(normalizeMomConfig({ risk_basis: "E" }).risk_basis, "E");
+});
+
+test("11. covered calls are off by default", () => {
+  assert.equal(MOM_DEFAULTS.covered_calls, false);
+});
+
+test("13. execution alerts: 10:30 ET in EDT and EST; GTC update when ≥ 2% above posted", () => {
+  assert.equal(isUrgentAlertTime(new Date("2026-10-01T14:30:00Z")), true);  // EDT
+  assert.equal(isUrgentAlertTime(new Date("2026-10-01T15:30:00Z")), false);
+  assert.equal(isUrgentAlertTime(new Date("2026-12-01T15:30:00Z")), true);  // EST
+  assert.equal(isUrgentAlertTime(new Date("2026-12-01T14:30:00Z")), false);
+  assert.equal(isUrgentAlertTime(new Date("2026-10-03T14:30:00Z")), false); // Saturday
+  const sells = [
+    { ticker: "AAA", shares_to_sell: 10, exit_trigger: 2, urgent: true, deadline: null, note: "Closed 9.80 at or below the stop 10.00." },
+    { ticker: "BBB", shares_to_sell: 5, exit_trigger: 3, urgent: false, deadline: null, note: null },
+  ];
+  assert.deepEqual(formatUrgentPush(sells), { title: "Momentum: 1 urgent sell still open", body: "SELL AAA 10 sh: Stop hit — Closed 9.80 at or below the stop 10.00." });
+  assert.equal(formatUrgentPush([sells[1]]), null);
+  assert.equal(gtcNeedsUpdate({ disaster_stop: 101.9, disaster_posted: 100 }), false);
+  assert.equal(gtcNeedsUpdate({ disaster_stop: 102, disaster_posted: 100 }), true);
+  assert.equal(gtcNeedsUpdate({ disaster_stop: 90, disaster_posted: null }), true);
+  assert.deepEqual(gtcLines([{ ticker: "AAA", disaster_stop: 102.5, disaster_posted: 100 }, { ticker: "BBB", disaster_stop: 50, disaster_posted: 49.9 }]), ["Update GTC stop AAA → 102.50"]);
+});
+
+test("14. equity journal: value, benchmarks from the same start, after-tax, trailing returns, kill switch", () => {
+  const cfg = MOM_DEFAULTS;
+  const r0 = equityRow({ d: "2025-10-01", b: 20_000, open: [], closed: [], spy: 500, mtum: 200, m: 1, first: null, cfg });
+  assert.deepEqual([r0.strategy_value, r0.spy_value, r0.mtum_value, r0.cash], [20_000, 20_000, 20_000, 20_000]);
+  const r1 = equityRow({
+    d: "2026-03-02", b: 20_000, spy: 550, mtum: 230, m: 0.8, cfg,
+    open: [{ shares: 10, fill_price: 100, close: 130, lt_date: "2026-12-01" }],
+    closed: [{ pnl: 500, term: "ST", exit_date: "2026-02-01", exit_price: 150, shares: 10, r_multiple: 2.5, days_held: 40 }],
+    first: { strategy_value: 20_000, spy: 500, mtum: 200 },
+  });
+  // open 1300 + realized 500 + cash (20000 − 1000) = 20800
+  assert.equal(r1.strategy_value, 20_800);
+  assert.equal(r1.spy_value, 22_000);
+  assert.equal(r1.mtum_value, 23_000);
+  assert.equal(r1.realized_st_ytd, 500);
+  // tax: 500 × 0.30 realized ST + 300 × 0.30 unrealized ST
+  assert.ok(Math.abs(r1.tax_est - 240) < 1e-9);
+  assert.equal(r1.after_tax_value, 20_560);
+  const rows: EquityRow[] = [r0, { ...r1, d: "2026-10-01", after_tax_value: 21_000, mtum_value: 24_000 }];
+  assert.ok(Math.abs(trailingReturn(rows, 12, "after_tax_value")! - 0.05) < 1e-9);
+  assert.equal(trailingReturn([r1], 12, "after_tax_value"), null); // not 12 months of history yet
+  const k = killSwitch(rows);
+  assert.equal(k.active, true); // +5% after tax vs MTUM +20%
+  assert.equal(killSwitch([r0]).active, false);
+  const st = tradeStats([{ pnl: 500, term: "ST", exit_date: "2026-09-01", exit_price: 150, shares: 10, r_multiple: 2.5, days_held: 40 },
+    { pnl: -100, term: "ST", exit_date: "2026-09-10", exit_price: 90, shares: 10, r_multiple: -1, days_held: 10 }], rows, "2026-10-01");
+  assert.deepEqual([st.winRate, st.avgR, st.avgDaysHeld], [0.5, 0.75, 25]);
+  assert.match(monthEndLines({ kill: k, idle: 0, cashEtf: "SGOV" })[0], /Kill switch: .*trails MTUM.*ETF version/);
+});
+
+test("15. idle cash: under half of I invested → suggest the cash ETF", () => {
+  assert.equal(idleCash(5_000, 19_600), 14_600);
+  assert.equal(idleCash(12_000, 19_600), 0);
+  assert.equal(MOM_DEFAULTS.cash_etf, "SGOV");
+  assert.deepEqual(monthEndLines({ kill: { active: false, mine: null, mtum: null }, idle: 14_600, cashEtf: "SGOV" }),
+    ["Idle cash $14,600: park it in SGOV or confirm the broker cash sweep."]);
+});
+
+test("16. fundamentals: a missing market cap never nulls the stored one; TTM sums need four quarters", () => {
+  assert.equal("market_cap" in tickerPatch({ sic_code: "2834" }), false);
+  assert.equal("market_cap" in tickerPatch({ market_cap: null }), false);
+  assert.equal(tickerPatch({ market_cap: 5e9 }).market_cap, 5e9);
+  assert.equal(sum4([{ revenue: 1 }, { revenue: 2 }, { revenue: 3 }, { revenue: 4 }, { revenue: 9 }], "revenue"), 10);
+  assert.equal(sum4([{ revenue: 1 }, { revenue: 2 }, { revenue: 3 }], "revenue"), null);
+});
+
+function manualBase(): ManualCheck {
+  return {
+    holding: false, inUniverse: true, entryOk: true, riskOn: true, rebalanceDay: false, heldCount: 5, N: 13, I: 19_600,
+    sector: "Energy", sectorNamesAfter: 2, sectorDollarsAfter: 3000, shares: 56, price: 21.12, D: 2.35, target: 1189, valueBefore: 0,
+  };
+}

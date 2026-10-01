@@ -22,7 +22,11 @@ async function get<T>(pathOrUrl: string, params: Record<string, string | number>
       await sleep(MIN_GAP_MS * 2);
       continue;
     }
-    if (!res.ok) throw new Error(`Massive ${url.pathname} → ${res.status} ${await res.text()}`);
+    if (!res.ok) {
+      const sunset = [res.headers.get("sunset") && `sunset ${res.headers.get("sunset")}`, res.headers.get("link")].filter(Boolean).join("; ");
+      throw new Error(`Massive ${url.pathname} → ${res.status} ${(await res.text()).slice(0, 300)}${sunset ? ` [${sunset}]` : ""}`);
+    }
+    if (res.headers.get("deprecation")) console.warn(`Massive ${url.pathname} is deprecated: sunset ${res.headers.get("sunset")} ${res.headers.get("link") ?? ""}`);
     return (await res.json()) as T;
   }
   throw new Error(`Massive ${url.pathname} → rate limited`);
@@ -78,28 +82,32 @@ export async function tickerDetails(ticker: string): Promise<TickerDetails | nul
   return r.results ?? null;
 }
 
-type FinVal = { value?: number } | undefined;
-export type FinancialReport = {
-  end_date?: string;
-  fiscal_period?: string;
-  fiscal_year?: string;
-  financials?: {
-    income_statement?: Record<string, FinVal>;
-    balance_sheet?: Record<string, FinVal>;
-    cash_flow_statement?: Record<string, FinVal>;
-  };
+// Fundamentals (successor to the retired /vX/reference/financials, sunset 2026-10-09): flat
+// statement rows per period from /stocks/financials/v1/*.
+export type IncomeStatement = {
+  period_end?: string; fiscal_year?: number; fiscal_quarter?: number; timeframe?: string;
+  revenue?: number; gross_profit?: number; operating_income?: number; net_income_loss_attributable_common_shareholders?: number;
+  consolidated_net_income_loss?: number; diluted_earnings_per_share?: number; basic_earnings_per_share?: number;
+};
+export type BalanceSheet = {
+  period_end?: string; total_equity_attributable_to_parent?: number; total_equity?: number; total_liabilities?: number;
+  total_current_assets?: number; total_current_liabilities?: number;
 };
 
-/** Last few quarterly reports (newest first). */
-export async function financials(ticker: string, limit = 5): Promise<FinancialReport[]> {
-  const r = await get<{ results?: FinancialReport[] }>("/vX/reference/financials", {
-    ticker,
-    timeframe: "quarterly",
-    order: "desc",
-    sort: "period_of_report_date",
-    limit,
+/** Last few quarterly income statements (newest first). */
+export async function incomeStatements(ticker: string, limit = 5): Promise<IncomeStatement[]> {
+  const r = await get<{ results?: IncomeStatement[] }>("/stocks/financials/v1/income-statements", {
+    tickers: ticker, timeframe: "quarterly", sort: "period_end.desc", limit,
   });
   return r.results ?? [];
+}
+
+/** Latest quarterly balance sheet. */
+export async function balanceSheet(ticker: string): Promise<BalanceSheet | null> {
+  const r = await get<{ results?: BalanceSheet[] }>("/stocks/financials/v1/balance-sheets", {
+    tickers: ticker, timeframe: "quarterly", sort: "period_end.desc", limit: 1,
+  });
+  return r.results?.[0] ?? null;
 }
 
 /** One ticker's daily bars between two dates (inclusive), oldest first. One API call. */

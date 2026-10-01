@@ -1,5 +1,5 @@
 // Position sizing and buy-list selection (spec sections 6 and 7.1–7.5). Pure; used by the page and tests.
-import { capitalAndSlots, type MomConfig } from "./config.ts";
+import { capitalAndSlots, riskBudget, type MomConfig } from "./config.ts";
 
 /**
  * Sector-cap bucket: the GICS sector from momSector() (sector-key.ts). A missing sector becomes
@@ -40,10 +40,11 @@ export const round2 = (x: number) => Math.round(x * 100 + 1e-9) / 100;
 export const entryCap = (S: number, cfg: Pick<MomConfig, "chase_cap_pct">) => round2(S * (1 + cfg.chase_cap_pct));
 
 /** Shares = min(target shares, risk-cap shares); whole shares, or 3 decimals when fractional. */
-export function positionShares(T: number, LP: number, D: number, cfg: Pick<MomConfig, "max_risk_pct_of_E" | "E" | "fractional_shares">) {
+export function positionShares(T: number, LP: number, D: number,
+  cfg: Pick<MomConfig, "risk_basis" | "B" | "E" | "max_risk_pct_of_B" | "max_risk_pct_of_E" | "fractional_shares">) {
   const floorTo = (x: number) => (cfg.fractional_shares ? Math.floor(x * 1000 + 1e-9) / 1000 : Math.floor(x + 1e-9));
   const byTarget = floorTo(T / LP);
-  const byRisk = floorTo((cfg.max_risk_pct_of_E * cfg.E) / D);
+  const byRisk = floorTo(riskBudget(cfg) / D);
   const shares = Math.min(byTarget, byRisk);
   // Rule 6.7: too few whole shares to be worth it → skip (fractional accounts never skip).
   const tooSmall = !cfg.fractional_shares && shares * LP < 0.5 * T;
@@ -84,6 +85,8 @@ export function planPortfolio(args: {
   riskOn: boolean | null;
   earnings?: Set<string>;
   washBlocked?: Set<string>;
+  /** Volatility brake m (0–1): every target T is scaled by it. */
+  scale?: number;
 }): Plan {
   const { cfg } = args;
   const held = args.held ?? [];
@@ -116,7 +119,7 @@ export function planPortfolio(args: {
     const known = sig.filter((s) => Number.isFinite(s)).sort((a, b) => a - b);
     const med = known.length ? known[Math.floor(known.length / 2)] : 0.3;
     const w = clampWeights(sig.map((s) => (Number.isFinite(s) ? s : med)), cfg);
-    const T = w.map((x) => (x * I * n) / N);
+    const T = w.map((x) => (x * I * n * (args.scale ?? 1)) / N);
     const buys: PlannedBuy[] = picks.map((p, i) => {
       const j = held.length + i;
       const cap = entryCap(p.close, cfg);

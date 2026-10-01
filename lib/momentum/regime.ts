@@ -3,6 +3,9 @@ import { isMonthEnd, type Calendar } from "./calendar.ts";
 
 export type Regime = {
   riskOn: boolean | null;
+  /** State at the prior month-end (null = unknown → plain close ≥ SMA rule). */
+  prior?: boolean | null;
+  band?: number;
   monthEnd: string | null;
   close: number | null;
   sma: number | null;
@@ -26,7 +29,15 @@ export function monthEndCloses(bars: { d: string; c: number }[], t: string, cal:
   return out;
 }
 
-export function regimeAt(bars: { d: string; c: number }[], t: string, cal: Calendar, months = 10): Regime {
+/**
+ * Regime with a buffer: from risk-on, go risk-off only below SMA × (1 − band); from risk-off, go
+ * risk-on at SMA or above; unknown prior state → close ≥ SMA.
+ */
+export function regimeState(close: number, sma: number, prior: boolean | null | undefined, band: number): boolean {
+  return prior === true ? close >= sma * (1 - band) : close >= sma;
+}
+
+export function regimeAt(bars: { d: string; c: number }[], t: string, cal: Calendar, months = 10, band = 0, prior: boolean | null = null): Regime {
   const all = monthEndCloses(bars, t, cal);
   const lastN = all.slice(-months);
   if (lastN.length < months) {
@@ -35,5 +46,5 @@ export function regimeAt(bars: { d: string; c: number }[], t: string, cal: Calen
   }
   const sma = lastN.reduce((s, m) => s + m.close, 0) / months;
   const cur = lastN[lastN.length - 1];
-  return { riskOn: cur.close >= sma, monthEnd: cur.d, close: cur.close, sma, months: lastN };
+  return { riskOn: regimeState(cur.close, sma, prior, band), prior, band, monthEnd: cur.d, close: cur.close, sma, months: lastN };
 }

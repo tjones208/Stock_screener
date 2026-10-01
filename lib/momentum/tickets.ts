@@ -7,6 +7,7 @@ import { addTradingDays, type Calendar } from "./calendar";
 import { planPortfolio, type Candidate, type Held } from "./sizing";
 import { advanceTicket, fillLevels, type TicketState } from "./orders";
 import { tickerSectors, withSectors } from "./sector-db";
+import { washOnBuy } from "./positions";
 
 export type Ticket = {
   id: number; signal_date: string; kind: string; side: string; ticker: string; status: TicketState["status"];
@@ -21,8 +22,12 @@ export type Ticket = {
 
 type SnapRow = Candidate & { mom_pct: number; h52: number; days_since_high: number };
 
+/** Plan inputs that change nightly: volatility brake m and the wash-sale block (ticker → loss-exit date). */
+export type BuyOpts = { earningsUnchecked?: boolean; m?: number; washBlocked?: Map<string, string> };
+const washSet = (o: BuyOpts) => new Set(o.washBlocked?.keys() ?? []);
+
 /** Snapshot rows with their GICS sector key (resolved now from ss_tickers, so every reader buckets alike). */
-async function snapshot(t: string): Promise<SnapRow[]> {
+export async function snapshot(t: string): Promise<SnapRow[]> {
   const rows = await fetchAll<Omit<SnapRow, "sector">>((a, b) =>
     db().from("ss_mom_snapshots").select("ticker, comp_rank, close, sigma63, atr20, entry_ok, mom_pct, h52, days_since_high")
       .eq("signal_date", t).order("comp_rank").range(a, b));
@@ -30,7 +35,7 @@ async function snapshot(t: string): Promise<SnapRow[]> {
 }
 
 /** Open lots plus live buy tickets from other plans: both occupy slots and count toward sector caps. */
-async function occupied(excludePlan?: { signal_date: string; kind: string }): Promise<Held[]> {
+export async function occupied(excludePlan?: { signal_date: string; kind: string }): Promise<Held[]> {
   const [{ data: allLots }, { data: tix }, { data: sells }] = await Promise.all([
     db().from("ss_mom_lots").select("ticker, shares, fill_price, sigma63").is("exit_date", null),
     db().from("ss_mom_tickets").select("ticker, sector, sigma63, t_target, signal_date, kind").eq("side", "buy").eq("status", "open").neq("kind", "topup"),
@@ -59,7 +64,7 @@ async function occupied(excludePlan?: { signal_date: string; kind: string }): Pr
 }
 
 /** Tickers never offered as new buys: already owned (any open lot) or being sold. */
-async function ownedOrSelling(): Promise<Set<string>> {
+export async function ownedOrSelling(): Promise<Set<string>> {
   const [{ data: lots }, { data: sells }] = await Promise.all([
     db().from("ss_mom_lots").select("ticker").is("exit_date", null),
     db().from("ss_mom_tickets").select("ticker").eq("side", "sell").eq("status", "open"),
@@ -67,7 +72,7 @@ async function ownedOrSelling(): Promise<Set<string>> {
   return new Set([...(lots ?? []), ...(sells ?? [])].map((x) => x.ticker));
 }
 
-async function earningsWithin(cal: Calendar, t: string, cfg: MomConfig): Promise<Set<string>> {
+export async function earningsWithin(cal: Calendar, t: string, cfg: MomConfig): Promise<Set<string>> {
   const until = addTradingDays(cal, t, cfg.earnings_blackout_days);
   const { data } = await db().from("ss_earnings_calendar").select("ticker").gt("report_date", t).lte("report_date", until);
   return new Set((data ?? []).map((r) => r.ticker));
@@ -75,7 +80,7 @@ async function earningsWithin(cal: Calendar, t: string, cfg: MomConfig): Promise
 
 /** Tickets for a weekly refill or monthly rebalance. Idempotent per (signal date, kind). */
 export async function createTickets(t: string, kind: "weekly" | "monthly", cfg: MomConfig, riskOn: boolean | null, tradeDay: string, cal: Calendar,
-  opts: { earningsUnchecked?: boolean } = {}) {
+  opts: BuyOpts = {}) {
   if (riskOn !== true) {
     // Regime exit: no buys or refills; open buy tickets are cancelled.
     const { data } = await db().from("ss_mom_tickets").update({ status: "cancelled", note: "Regime not risk-on", updated_at: new Date().toISOString() })
@@ -85,7 +90,7 @@ export async function createTickets(t: string, kind: "weekly" | "monthly", cfg: 
   const { count } = await db().from("ss_mom_tickets").select("id", { count: "exact", head: true }).eq("signal_date", t).eq("kind", kind);
   if (count) return { created: 0, existing: count };
   const [snap, held, earnings, busy] = await Promise.all([snapshot(t), occupied(), earningsWithin(cal, t, cfg), ownedOrSelling()]);
-  const plan = planPortfolio({ cfg, candidates: snap.filter((x) => !busy.has(x.ticker)), held, riskOn, earnings });
+  const plan = planPortfolio({ cfg, candidates: snap.filter((x) => !busy.has(x.ticker)), held, riskOn, earnings, washBlocked: washSet(opts), scale: opts.m });
   const byTicker = new Map(snap.map((s) => [s.ticker, s]));
   const rows = [
     ...plan.buys.map((b) => ({
@@ -117,14 +122,15 @@ export async function createTickets(t: string, kind: "weekly" | "monthly", cfg: 
  * names, keep this plan's live tickets, and open the first new name (normally the next alternate).
  */
 export async function promoteAlternate(plan: { signal_date: string; kind: string }, tradeDay: string, cfg: MomConfig, cal: Calendar,
-  opts: { earningsUnchecked?: boolean } = {}) {
+  opts: BuyOpts = {}) {
   const { data: mine } = await db().from("ss_mom_tickets").select("id, ticker, status").eq("signal_date", plan.signal_date).eq("kind", plan.kind).eq("side", "buy");
   const dropped = new Set((mine ?? []).filter((m) => m.status === "dropped" || m.status === "cancelled").map((m) => m.ticker));
   const live = new Set((mine ?? []).filter((m) => m.status === "open" || m.status === "filled").map((m) => m.ticker));
   const [snap, held, earnings, busy] = await Promise.all([snapshot(plan.signal_date), occupied(plan), earningsWithin(cal, plan.signal_date, cfg), ownedOrSelling()]);
   // This plan's filled names are already lots (in `held`); its open ones are re-picked from the snapshot.
   const lots = new Set(held.map((h) => h.ticker));
-  const p = planPortfolio({ cfg, candidates: snap.filter((s) => !dropped.has(s.ticker) && !busy.has(s.ticker)), held, riskOn: true, earnings });
+  const p = planPortfolio({ cfg, candidates: snap.filter((s) => !dropped.has(s.ticker) && !busy.has(s.ticker)), held, riskOn: true, earnings,
+    washBlocked: washSet(opts), scale: opts.m });
   const next = p.buys.find((b) => !live.has(b.ticker) && !lots.has(b.ticker));
   if (!next) return null;
   const s = snap.find((x) => x.ticker === next.ticker)!;
@@ -146,7 +152,7 @@ export async function promoteAlternate(plan: { signal_date: string; kind: string
  * slot empty instead of promoting the next name.
  */
 export async function advanceTickets(latestSignal: string, tradeDay: string, cfg: MomConfig, cal: Calendar,
-  opts: { allowNewBuys?: boolean; earningsUnchecked?: boolean } = {}) {
+  opts: BuyOpts & { allowNewBuys?: boolean } = {}) {
   const allowNewBuys = opts.allowNewBuys ?? true;
   const { data: open } = await db().from("ss_mom_tickets").select("*").eq("side", "buy").eq("status", "open").lt("trade_date", tradeDay);
   if (!open?.length) return { advanced: 0, dropped: 0, promoted: [] as string[] };
@@ -168,7 +174,7 @@ export async function advanceTickets(latestSignal: string, tradeDay: string, cfg
     if (promote) {
       dropped++;
       // A dropped top-up just lapses; only new-position slots go to the next name.
-      const p = t.kind === "topup" || !allowNewBuys ? null : await promoteAlternate(t, tradeDay, cfg, cal, { earningsUnchecked: opts.earningsUnchecked });
+      const p = t.kind === "topup" || !allowNewBuys ? null : await promoteAlternate(t, tradeDay, cfg, cal, opts);
       if (p) promoted.push(p);
     }
   }
@@ -188,13 +194,14 @@ export async function recordFill(ticketId: number, F: number, shares: number, fi
     db().from("ss_earnings_calendar").select("report_date").eq("ticker", ticket.ticker).gte("report_date", day).order("report_date").limit(1),
   ]);
   const { I, N } = capitalAndSlots(cfg);
+  const wash = await washOnBuy(ticket.ticker, day);
   const { error } = await db().from("ss_mom_lots").insert({
     ticker: ticket.ticker, figi: tk?.composite_figi ?? null, ticket_id: ticket.id, signal_date: ticket.signal_date,
     s_close: ticket.s_close, mom_pct: ticket.mom_pct, h52: ticket.h52, days_since_high: ticket.days_since_high, comp_rank: ticket.comp_rank,
     sigma63: ticket.sigma63, atr20: ticket.atr20, regime: "risk-on", b: cfg.B, e: cfg.E, i: I, n: N, w: ticket.w, t_target: ticket.t_target,
     shares, risk_cap_shares: ticket.risk_cap_shares, lp1: ticket.lp1, lp2: ticket.lp2, fill_price: F, filled_at: filledAt,
     d: lv.D, stop0: lv.stop0, stop: lv.stop0, highest_close: F, disaster_stop: lv.disaster,
-    earnings_date: er?.[0]?.report_date ?? null, lt_date: lv.ltDate,
+    earnings_date: er?.[0]?.report_date ?? null, lt_date: lv.ltDate, wash_sale: wash,
     slippage_s_bps: ticket.s_close ? Math.round((F / ticket.s_close - 1) * 10_000 * 10) / 10 : null,
     slippage_lp_bps: ticket.lp1 ? Math.round((F / ticket.lp1 - 1) * 10_000 * 10) / 10 : null,
   });

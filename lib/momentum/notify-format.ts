@@ -12,9 +12,54 @@ export function earningsWarning(uncheckedBuys: number): string | null {
 }
 
 /** Warning lines (earnings unchecked, new buys blocked) lead the body so they show in the notification preview. */
-export function formatSellPush(today: string, sells: SellLine[], openLots: number, assigned: AssignLine[] = [], warnings: string[] = []) {
+export function formatSellPush(today: string, sells: SellLine[], openLots: number, assigned: AssignLine[] = [], warnings: string[] = [], notes: string[] = []) {
   const m = formatSells(today, sells, openLots, assigned);
-  return warnings.length ? { title: m.title, body: [...warnings, m.body].join("\n") } : m;
+  return warnings.length || notes.length ? { title: m.title, body: [...warnings, m.body, ...notes].join("\n") } : m;
+}
+
+/** "Update GTC stop" lines: disaster stop ≥ 2% above what's posted at the broker (any day). */
+export function gtcLines(lots: { ticker: string; disaster_stop: number; disaster_posted: number | null }[]) {
+  const by = new Map<string, number>();
+  for (const l of lots) {
+    if (l.disaster_posted != null && l.disaster_stop < l.disaster_posted * 1.02 - 1e-9) continue;
+    by.set(l.ticker, Math.max(by.get(l.ticker) ?? 0, l.disaster_stop));
+  }
+  return [...by].map(([t, v]) => `Update GTC stop ${t} → ${v.toFixed(2)}`);
+}
+
+/** Volatility-brake line: m and what it does today. */
+export function volLine(m: number, trimBelow: number) {
+  if (m >= 0.999) return null;
+  return `Volatility brake m = ${m.toFixed(2)}: new buys at ${Math.round(m * 100)}% of target${m < trimBelow ? "; trims on weekly / month-end signals" : ""}.`;
+}
+
+/** Month-end lines: kill switch (strategy trails MTUM after tax over 12 months) and idle cash. */
+export function monthEndLines(a: { kill: { active: boolean; mine: number | null; mtum: number | null }; idle: number; cashEtf: string }) {
+  const out: string[] = [];
+  if (a.kill.active) {
+    out.push(`Kill switch: 12-month after-tax return ${(100 * (a.kill.mine ?? 0)).toFixed(1)}% trails MTUM ${(100 * (a.kill.mtum ?? 0)).toFixed(1)}%. Consider the ETF version.`);
+  }
+  if (a.idle > 0) out.push(`Idle cash $${Math.round(a.idle).toLocaleString("en-US")}: park it in ${a.cashEtf} or confirm the broker cash sweep.`);
+  return out;
+}
+
+/** True when `now` is 10:30 ET (any minute 10:25–10:44) on a weekday; cron fires at both UTC offsets. */
+export function isUrgentAlertTime(now: Date) {
+  const p = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour12: false, weekday: "short", hour: "2-digit", minute: "2-digit" })
+    .formatToParts(now).map((x) => [x.type, x.value]));
+  const h = Number(p.hour) % 24, mi = Number(p.minute);
+  return !["Sat", "Sun"].includes(p.weekday) && h === 10 && mi >= 25 && mi < 45;
+}
+
+/** 10:30 ET reminder: urgent sells still open. Null when there are none. */
+export function formatUrgentPush(sells: SellLine[]) {
+  const urgent = sells.filter((s) => s.urgent);
+  if (!urgent.length) return null;
+  return {
+    title: `Momentum: ${urgent.length} urgent sell${urgent.length === 1 ? "" : "s"} still open`,
+    body: urgent.slice(0, 6).map((s) => `SELL ${s.ticker} ${s.shares_to_sell} sh: ${TRIGGER_LABEL[s.exit_trigger] ?? "exit"}${s.note ? ` — ${s.note}` : ""}`).join("\n")
+      + (urgent.length > 6 ? `\n+${urgent.length - 6} more on the Momentum tab` : ""),
+  };
 }
 
 function formatSells(today: string, sells: SellLine[], openLots: number, assigned: AssignLine[]) {

@@ -1,7 +1,12 @@
 import Link from "next/link";
 import { db } from "@/lib/db";
 import { big, money, num, pct } from "@/lib/format";
-import { capitalAndSlots, MOM_FIELDS } from "@/lib/momentum/config";
+import { capitalAndSlots, MOM_CHOICES, MOM_FIELDS, riskBudget } from "@/lib/momentum/config";
+import { journal } from "@/lib/momentum/equity";
+import { idleCash, type EquityRow } from "@/lib/momentum/journal";
+import { closedLots } from "@/lib/momentum/positions";
+import { washBlocked } from "@/lib/momentum/risk";
+import { gtcNeedsUpdate } from "@/lib/momentum/stops";
 import { getMomConfig, loadCalendar } from "@/lib/momentum/jobs";
 import { addTradingDays } from "@/lib/momentum/calendar";
 import { planPortfolio, type Candidate, type Plan } from "@/lib/momentum/sizing";
@@ -19,6 +24,8 @@ type Snap = {
   ticker: string; close: number; market_cap: number | null; sic2: string | null; comp_rank: number;
   mom: number; h52: number; days_since_high: number; mom_pct: number; h52_pct: number; composite: number;
   sigma63: number | null; atr20: number | null; entry_ok: boolean; hold_ok: boolean;
+  sigma252: number | null; composite_classic: number | null; composite_risk_adj: number | null;
+  held_outside_universe: boolean; outside_reason: string | null; hold_reason: string | null; entry_reason: string | null;
 };
 type Flag = { ticker: string; kind: string; d: string; detail: string | null; excludes: boolean };
 
@@ -35,7 +42,7 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
   const run = runs?.[0];
   const [snap, flags, earnings, news, splits] = await Promise.all([
     run
-      ? db().from("ss_mom_snapshots").select("ticker, close, market_cap, sic2, comp_rank, mom, h52, days_since_high, mom_pct, h52_pct, composite, sigma63, atr20, entry_ok, hold_ok")
+      ? db().from("ss_mom_snapshots").select("ticker, close, market_cap, sic2, comp_rank, mom, h52, days_since_high, mom_pct, h52_pct, composite, sigma63, atr20, entry_ok, hold_ok, sigma252, composite_classic, composite_risk_adj, held_outside_universe, outside_reason, hold_reason, entry_reason")
           .eq("signal_date", run.signal_date).order("comp_rank").limit(sp.all ? 1500 : 60)
       : Promise.resolve({ data: [] }),
     db().from("ss_data_flags").select("ticker, kind, d, detail, excludes").eq("cleared", false).order("d", { ascending: false }).limit(500),
@@ -71,7 +78,13 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
     ? await db().from("ss_earnings_calendar").select("ticker, report_date, hour, eps_estimate, source")
         .in("ticker", watchTickers).gte("report_date", new Date().toISOString().slice(0, 10)).order("report_date").limit(100)
     : { data: [] };
-  const plan = run ? await buildPlan(run.signal_date, cfg, (run.regime as Regime | null)?.riskOn ?? null) : null;
+  const runState = run?.regime as (Regime & { volScale?: number; spyVol?: number | null; holdCutoff?: number; universe?: number }) | null | undefined;
+  const m = runState?.volScale ?? 1;
+  const plan = run ? await buildPlan(run.signal_date, cfg, runState?.riskOn ?? null, m) : null;
+  const jr = await journal(run?.signal_date ?? new Date().toISOString().slice(0, 10));
+  const lastEq = jr.rows.at(-1);
+  const investedValue = lots.reduce((a, l) => a + l.shares * (lastClose.get(l.ticker) ?? l.fill_price), 0);
+  const idle = idleCash(investedValue, I);
   const allFlags = (flags.data ?? []) as Flag[];
   const blocking = allFlags.filter((f) => f.excludes);
   const review = allFlags.filter((f) => !f.excludes);
@@ -138,6 +151,19 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
         </div>
       )}
 
+      {jr.kill.active && (
+        <div className="notice notice-danger">
+          <b>Kill switch.</b> The strategy&apos;s 12-month after-tax return ({pct(jr.kill.mine, 1, 100)}) trails MTUM ({pct(jr.kill.mtum, 1, 100)}).
+          Consider switching to the ETF version.
+        </div>
+      )}
+      {idle > 0 && (
+        <div className="notice">
+          Idle cash: only {money(investedValue, 0)} of {money(I, 0)} investable is in positions. Park the idle {money(idle, 0)} in {cfg.cash_etf},
+          or confirm your broker&apos;s cash sweep pays interest. (Informational: no tickets.)
+        </div>
+      )}
+
       {cfg.B < cfg.min_B_stock_version && (
         <div className="notice">B is below {money(cfg.min_B_stock_version, 0)}: stop the stock version and use a momentum ETF with the same regime filter.</div>
       )}
@@ -147,6 +173,12 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
           <div className="k">Regime (SPY vs {cfg.regime_sma_months}-mo SMA)</div>
           <div className={`v ${regime?.riskOn ? "up" : regime?.riskOn === false ? "down" : ""}`}>
             {regime?.riskOn == null ? "Unknown" : regime.riskOn ? "Risk-on: buys allowed" : "Risk-off: no buys"}
+          </div>
+        </div>
+        <div className="stat">
+          <div className="k">Volatility brake m (SPY {runState?.spyVol != null ? pct(runState.spyVol, 0, 100) : "—"} vol)</div>
+          <div className={`v ${m < cfg.vol_trim_trigger ? "down" : m < 1 ? "" : "up"}`}>
+            {num(m, 2)}{m < 1 ? ` · buys at ${Math.round(m * 100)}% of target` : ""}{m < cfg.vol_trim_trigger ? " · trims on" : ""}
           </div>
         </div>
         <div className="stat"><div className="k">Positions / target N</div><div className="v">{new Set(lots.map((l) => l.ticker)).size} / {N}</div></div>
@@ -174,7 +206,7 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
         hint={lots.length ? "What you own, with today's stop and disaster stop" : "No positions yet"}>
         {added && <AddedNotice lot={added} />}
         <AddForm preview={preview} />
-        <PositionsSection lots={lots} lastClose={lastClose} weekly={rebalance} />
+        <PositionsSection lots={lots} lastClose={lastClose} />
       </Section>
 
       <div id="watch" />
@@ -193,7 +225,7 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
       {plan && !rebalance && (
         <Section tag="watch" title="Next rebalance preview" count={plan.buys.length} open={false}
           hint={`Not orders: what a rebalance on ${run?.signal_date}'s close would buy`}>
-          <PlanSection plan={plan} kind={run?.kind} signalDate={run?.signal_date} chase={cfg.chase_cap_pct} risk={cfg.max_risk_pct_of_E} equity={cfg.E} />
+          <PlanSection plan={plan} kind={run?.kind} signalDate={run?.signal_date} chase={cfg.chase_cap_pct} budget={riskBudget(cfg)} basis={cfg.risk_basis === "E" ? `${pct(cfg.max_risk_pct_of_E, 1, 100)} of equity E` : `${pct(cfg.max_risk_pct_of_B, 1, 100)} of buying power B`} />
         </Section>
       )}
 
@@ -201,7 +233,10 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
       <Section tag="info" title="Ranking" count={rows.length} open={false} hint="Every stock in the universe, best first, with what it is to you">
         <p className="muted">
           Entry test: momentum percentile ≥ {cfg.entry_mom_pct}, H52 ≥ {cfg.entry_h52}, ≤ {cfg.entry_max_days_since_high} days since the high.
-          Hold test: momentum percentile ≥ {cfg.hold_mom_pct}, H52 ≥ {cfg.hold_h52}, CompRank ≤ {cfg.hold_comprank_mult * N}.
+          Entry also needs 12-1 momentum above {pct(cfg.abs_mom_min, 0, 100)} and no open buyout review.
+          Hold test: momentum percentile ≥ {cfg.hold_mom_pct}, H52 ≥ {cfg.hold_h52}, CompRank ≤ {runState?.holdCutoff ?? cfg.hold_comprank_mult * N}
+          {" "}(the larger of {cfg.hold_comprank_mult} × N = {cfg.hold_comprank_mult * N} and the top {pct(cfg.hold_rank_pct, 0, 100)} of the universe).
+          Ranking: {cfg.rank_method === "risk_adj" ? "risk-adjusted (0.75 × percentile of momentum ÷ σ252 + 0.25 × H52 percentile)" : "classic (50/50 momentum and H52 percentiles)"}.
           {" "}<Link href={sp.all ? "/momentum" : "/momentum?all=1"}>{sp.all ? "Show top 60" : "Show all"}</Link>
         </p>
         <div className="table-wrap">
@@ -209,7 +244,7 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
             <thead>
               <tr>
                 <th>Rank</th><th>Ticker</th><th>Status</th><th>Close</th><th>MOM</th><th>H52</th><th>Days since high</th><th>MOM pct</th><th>H52 pct</th>
-                <th>Composite</th><th>σ63</th><th>ATR20</th><th>Mkt cap</th><th>Sector</th><th>SIC</th><th>Entry</th><th>Hold</th><th></th>
+                <th>Composite</th><th title="0.5 × MOM pct + 0.5 × H52 pct">Classic</th><th title="0.75 × pct(MOM ÷ σ252) + 0.25 × H52 pct">Risk-adj</th><th>σ63</th><th>ATR20</th><th>Mkt cap</th><th>Sector</th><th>SIC</th><th>Entry</th><th>Hold</th><th></th>
               </tr>
             </thead>
             <tbody>
@@ -225,13 +260,16 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
                   <td>{num(r.mom_pct, 1)}</td>
                   <td>{num(r.h52_pct, 1)}</td>
                   <td className="score">{num(r.composite, 1)}</td>
+                  <td>{num(r.composite_classic, 1)}</td>
+                  <td>{num(r.composite_risk_adj, 1)}</td>
                   <td>{pct(r.sigma63, 0, 100)}</td>
                   <td>{num(r.atr20)}</td>
                   <td>{big(r.market_cap)}</td>
                   <td style={{ textAlign: "left" }}>{sectorLabel(rowSectors.get(r.ticker))}</td>
                   <td className="muted">{r.sic2 ?? "—"}</td>
-                  <td>{r.entry_ok ? <span className="up">✓</span> : <span className="muted">—</span>}</td>
-                  <td>{r.hold_ok ? <span className="up">✓</span> : <span className="muted">—</span>}</td>
+                  <td title={r.entry_reason ?? ""}>{r.entry_ok ? <span className="up">✓</span> : <span className="muted">—</span>}</td>
+                  <td title={r.hold_reason ?? ""}>{r.hold_ok ? <span className="up">✓</span> : <span className="muted">—</span>}
+                    {r.held_outside_universe && <span className="tag tag-watch" title={r.outside_reason ?? ""} style={{ marginLeft: 4 }}>HELD · OUTSIDE UNIVERSE</span>}</td>
                   <td><AddLink ticker={r.ticker} held={status.get(r.ticker) === "held"} /></td>
                 </tr>
               ))}
@@ -242,14 +280,19 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
 
       {plan && rebalance && (
         <Section tag="info" title="Buy list sizing" count={plan.buys.length} open={false} hint={`How today's buy orders were sized from the ${run?.kind} signal`}>
-          <PlanSection plan={plan} kind={run?.kind} signalDate={run?.signal_date} chase={cfg.chase_cap_pct} risk={cfg.max_risk_pct_of_E} equity={cfg.E} />
+          <PlanSection plan={plan} kind={run?.kind} signalDate={run?.signal_date} chase={cfg.chase_cap_pct} budget={riskBudget(cfg)} basis={cfg.risk_basis === "E" ? `${pct(cfg.max_risk_pct_of_E, 1, 100)} of equity E` : `${pct(cfg.max_risk_pct_of_B, 1, 100)} of buying power B`} />
         </Section>
       )}
+
+      <Section tag="info" title="Journal & benchmark" count={jr.rows.length} open={false} hint="Equity curve vs SPY and MTUM, after-tax returns and trade stats">
+        <JournalSection jr={jr} last={lastEq} />
+      </Section>
 
       <Section tag="info" title="Regime & notices" count={warnings.length} open={false} hint="SPY month-end closes and data warnings">
         {regime && (
           <p>
             {regime.reason ?? `SPY month-end ${regime.monthEnd}: ${num(regime.close)} vs ${cfg.regime_sma_months}-month SMA ${num(regime.sma)}.`}
+            {regime.prior != null && ` Prior month-end ${regime.prior ? "risk-on" : "risk-off"}; ${regime.prior ? `stays risk-on unless SPY closes below ${num((regime.sma ?? 0) * (1 - (regime.band ?? 0)))} (SMA − ${pct(regime.band, 0, 100)})` : "turns risk-on at the SMA"}.`}
             <br /><span className="muted">Month-end closes: {regime.months.map((m) => `${m.month} ${num(m.close)}`).join(" · ")}</span>
           </p>
         )}
@@ -328,8 +371,14 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
                     <label key={f.key} className="check">
                       <input type="checkbox" name={f.key} defaultChecked={cfg[f.key] as boolean} /> {f.label}
                     </label>
+                  ) : Array.isArray(MOM_CHOICES[f.key]) ? (
+                    <label key={f.key}>{f.label}
+                      <select name={f.key} defaultValue={String(cfg[f.key])}>
+                        {(MOM_CHOICES[f.key] as readonly string[]).map((o) => <option key={o} value={o}>{o}</option>)}
+                      </select>
+                    </label>
                   ) : (
-                    <label key={f.key}>{f.label}<input name={f.key} inputMode="decimal" defaultValue={String(cfg[f.key])} /></label>
+                    <label key={f.key}>{f.label}<input name={f.key} inputMode={MOM_CHOICES[f.key] ? "text" : "decimal"} defaultValue={String(cfg[f.key])} /></label>
                   ),
                 )}
               </div>
@@ -400,7 +449,7 @@ function FlagTable({ flags }: { flags: Flag[] }) {
   );
 }
 
-async function buildPlan(t: string, cfg: Awaited<ReturnType<typeof getMomConfig>>, riskOn: boolean | null): Promise<Plan> {
+async function buildPlan(t: string, cfg: Awaited<ReturnType<typeof getMomConfig>>, riskOn: boolean | null, m: number): Promise<Plan> {
   const [{ data: cands }, cal] = await Promise.all([
     db().from("ss_mom_snapshots").select("ticker, comp_rank, close, sigma63, atr20, entry_ok")
       .eq("signal_date", t).eq("entry_ok", true).order("comp_rank").limit(1000),
@@ -409,12 +458,12 @@ async function buildPlan(t: string, cfg: Awaited<ReturnType<typeof getMomConfig>
   // Earnings blackout: reports in the next N trading days after the signal date.
   const until = addTradingDays(cal, t, cfg.earnings_blackout_days);
   const { data: rep } = await db().from("ss_earnings_calendar").select("ticker").gt("report_date", t).lte("report_date", until);
-  // Holdings and wash-sale blocks come from the journal (build step 8); none are recorded yet.
   const candidates: Candidate[] = await withSectors((cands ?? []) as Omit<Candidate, "sector">[]);
-  return planPortfolio({ cfg, candidates, riskOn, earnings: new Set((rep ?? []).map((r) => r.ticker)) });
+  const wash = washBlocked(await closedLots(), t, cfg.wash_sale_block_days);
+  return planPortfolio({ cfg, candidates, riskOn, earnings: new Set((rep ?? []).map((r) => r.ticker)), washBlocked: new Set(wash.keys()), scale: m });
 }
 
-function PlanSection({ plan, kind, signalDate, chase, risk, equity }: { plan: Plan; kind?: string; signalDate?: string; chase: number; risk: number; equity: number }) {
+function PlanSection({ plan, kind, signalDate, chase, budget, basis }: { plan: Plan; kind?: string; signalDate?: string; chase: number; budget: number; basis: string }) {
   const total = plan.buys.reduce((a, b) => a + b.amount, 0);
   return (
     <>
@@ -428,14 +477,14 @@ function PlanSection({ plan, kind, signalDate, chase, risk, equity }: { plan: Pl
       {plan.message && <div className="notice">{plan.message}</div>}
       <p className="muted">
         <b>Shares by target</b> = the position&apos;s dollar target T ÷ the cap price (how many shares its share of the portfolio buys).{" "}
-        <b>Shares by risk limit</b> = your risk budget per position ({pct(risk, 1, 100)} of equity = {money(risk * equity, 0)}) ÷ the stop distance D (the most shares
+        <b>Shares by risk limit</b> = your risk budget per position ({basis} = {money(budget, 0)}) ÷ the stop distance D (the most shares
         you can hold so a stop-out loses no more than that). You buy the <b>smaller</b> of the two.
       </p>
       {plan.buys.length > 0 && (
         <div className="table-wrap">
           <table>
             <thead>
-              <tr><th>Ticker</th><th>Rank</th><th>Sector</th><th>σ63</th><th>Weight</th><th>Target T</th><th>Signal S</th><th>Cap</th><th>Stop dist. D</th><th title="Target T ÷ cap price: how many shares the dollar target buys">Shares by target</th><th title="Risk budget (0.5% of equity E) ÷ stop distance D: the most shares you can hold so a stop-out loses no more than the budget">Shares by risk limit</th><th title="The smaller of the two">Shares</th><th>Amount</th></tr>
+              <tr><th>Ticker</th><th>Rank</th><th>Sector</th><th>σ63</th><th>Weight</th><th>Target T</th><th>Signal S</th><th>Cap</th><th>Stop dist. D</th><th title="Target T ÷ cap price: how many shares the dollar target buys">Shares by target</th><th title="Risk budget per position ÷ stop distance D: the most shares you can hold so a stop-out loses no more than the budget">Shares by risk limit</th><th title="The smaller of the two">Shares</th><th>Amount</th></tr>
             </thead>
             <tbody>
               {plan.buys.map((b) => (
@@ -556,6 +605,7 @@ type LotView = {
   id: number; ticker: string; shares: number; fill_price: number; filled_at: string; d: number; stop0: number; stop: number;
   highest_close: number | null; disaster_stop: number; disaster_posted: number | null; lt_date: string; earnings_date: string | null;
   ticket_id: number | null; rule_broken: boolean; rule_note: string | null;
+  d_trail: number | null; wash_sale: boolean | null; lt_deferred_trigger: number | null; lt_deferred_reason: string | null;
 };
 type SellTicket = {
   id: number; ticker: string; exit_trigger: number; shares_to_sell: number; urgent: boolean; deadline: string | null; trade_date: string;
@@ -620,20 +670,21 @@ function ExitSection({ sells, callTickers }: { sells: SellTicket[]; callTickers:
   );
 }
 
-function PositionsSection({ lots, lastClose, weekly }: { lots: LotView[]; lastClose: Map<string, number>; weekly: boolean }) {
+function PositionsSection({ lots, lastClose }: { lots: LotView[]; lastClose: Map<string, number> }) {
   if (!lots.length) return <p className="muted">No positions yet. Recorded buy fills and stocks you add above show up here with their stops.</p>;
-  const stale = lots.filter((l) => l.disaster_posted == null || Math.abs(l.disaster_posted - l.disaster_stop) > 0.004);
+  // Any day: the disaster stop moved ≥ 2% above what's posted at the broker (or nothing is posted).
+  const stale = lots.filter(gtcNeedsUpdate);
   return (
     <>
-      {weekly && stale.length > 0 && (
+      {stale.length > 0 && (
         <div className="notice">
-          Friday disaster-stop update: move the broker GTC stop-market orders for {stale.map((l) => `${l.ticker} → ${num(l.disaster_stop)}`).join(", ")}.
+          {stale.map((l) => <div key={l.id}>Update GTC stop <b>{l.ticker}</b> → {num(l.disaster_stop)}{l.disaster_posted != null ? ` (posted ${num(l.disaster_posted)})` : " (none posted)"}</div>)}
         </div>
       )}
       <div className="table-wrap">
         <table>
           <thead>
-            <tr><th>Ticker</th><th>Entry</th><th>Shares</th><th>F</th><th>D</th><th>Stop0</th><th>High close</th><th>Stop</th><th>Disaster</th><th>At broker</th><th>Close</th><th>P&amp;L</th><th>R</th><th>Earnings</th><th>LT date</th><th></th></tr>
+            <tr><th>Ticker</th><th>Entry</th><th>Shares</th><th>F</th><th title="Entry stop distance (initial risk)">D</th><th title="Today's trailing distance D_t">D trail</th><th>Stop0</th><th>High close</th><th>Stop</th><th>Disaster</th><th>At broker</th><th>Close</th><th>P&amp;L</th><th>R</th><th>Earnings</th><th>LT date</th><th></th></tr>
           </thead>
           <tbody>
             {lots.map((l) => {
@@ -644,11 +695,14 @@ function PositionsSection({ lots, lastClose, weekly }: { lots: LotView[]; lastCl
                   <td>
                     <span className="tag tag-hold">HOLD</span> <Link href={`/t/${l.ticker}`}><b>{l.ticker}</b></Link>
                     {l.rule_broken && <span className="tag tag-watch" title={l.rule_note ?? ""} style={{ marginLeft: 4 }}>RULE BREAK</span>}
+                    {l.wash_sale && <span className="tag tag-watch" title="Bought within 30 days of a loss sale" style={{ marginLeft: 4 }}>WASH SALE</span>}
+                    {l.lt_deferred_trigger != null && <div className="muted" title={l.lt_deferred_reason ?? ""}>{TRIGGER_LABEL[l.lt_deferred_trigger]}: deferred for LT until {l.lt_date}</div>}
                   </td>
                   <td>{l.filled_at.slice(0, 10)}</td>
                   <td>{l.shares}</td>
                   <td>{num(l.fill_price)}</td>
                   <td>{num(l.d)}</td>
+                  <td>{num(l.d_trail ?? l.d)}</td>
                   <td>{num(l.stop0)}</td>
                   <td>{num(l.highest_close)}</td>
                   <td className="score">{num(l.stop)}</td>
@@ -819,6 +873,88 @@ function CallsSection({ ideas, calls, lastClose, cfg }: { ideas: IdeaView[]; cal
           </table>
         </div>
       )}
+    </>
+  );
+}
+
+const SERIES = [
+  { key: "after_tax_value", label: "Strategy (after tax)", color: "#3987e5" },
+  { key: "spy_value", label: "SPY", color: "#d95926" },
+  { key: "mtum_value", label: "MTUM", color: "#199e70" },
+] as const;
+
+/** Equity curve: strategy after tax vs SPY and MTUM from the same start (one axis, dollars). */
+function EquityChart({ rows }: { rows: EquityRow[] }) {
+  const W = 720, H = 220, L = 56, R = 110, T = 10, B = 24;
+  const vals = rows.flatMap((r) => SERIES.map((s) => r[s.key]).filter((v): v is number => v != null));
+  const lo = Math.min(...vals), hi = Math.max(...vals);
+  const pad = (hi - lo) * 0.05 || hi * 0.01 || 1;
+  const y0 = lo - pad, y1 = hi + pad;
+  const x = (i: number) => L + (rows.length > 1 ? (i / (rows.length - 1)) * (W - L - R) : 0);
+  const y = (v: number) => T + (1 - (v - y0) / (y1 - y0)) * (H - T - B);
+  const ticks = [0, 1, 2, 3].map((k) => y0 + ((y1 - y0) * k) / 3);
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Equity curve: strategy after tax vs SPY and MTUM" style={{ width: "100%", maxWidth: W, height: "auto" }}>
+      {ticks.map((v) => (
+        <g key={v}>
+          <line x1={L} x2={W - R} y1={y(v)} y2={y(v)} stroke="var(--line)" strokeWidth={1} />
+          <text x={L - 6} y={y(v) + 4} textAnchor="end" fontSize={11} fill="var(--muted)">{money(v, 0)}</text>
+        </g>
+      ))}
+      <text x={L} y={H - 6} fontSize={11} fill="var(--muted)">{rows[0].d}</text>
+      <text x={W - R} y={H - 6} fontSize={11} fill="var(--muted)" textAnchor="end">{rows.at(-1)!.d}</text>
+      {SERIES.map((s) => {
+        const pts = rows.map((r, i) => (r[s.key] != null ? `${x(i)},${y(r[s.key] as number)}` : null)).filter(Boolean);
+        const last = [...rows].reverse().find((r) => r[s.key] != null);
+        return (
+          <g key={s.key}>
+            <polyline points={pts.join(" ")} fill="none" stroke={s.color} strokeWidth={2} strokeLinejoin="round" />
+            {last && <text x={W - R + 6} y={y(last[s.key] as number) + 4} fontSize={11} fill="var(--text)">{s.label}</text>}
+          </g>
+        );
+      })}
+      {/* Hover: one hit column per day with every value. */}
+      {rows.map((r, i) => (
+        <rect key={r.d} x={x(i) - (W - L - R) / Math.max(rows.length, 1) / 2} y={T} width={(W - L - R) / Math.max(rows.length, 1)} height={H - T - B} fill="transparent">
+          <title>{`${r.d}\n${SERIES.map((s) => `${s.label}: ${r[s.key] != null ? money(r[s.key] as number, 0) : "—"}`).join("\n")}`}</title>
+        </rect>
+      ))}
+    </svg>
+  );
+}
+
+function JournalSection({ jr, last }: { jr: Awaited<ReturnType<typeof journal>>; last: EquityRow | undefined }) {
+  if (!jr.rows.length) return <p className="muted">The journal starts with the first nightly run after this release.</p>;
+  const r = jr.returns, s = jr.stats;
+  return (
+    <>
+      <div className="row" style={{ gap: 16, flexWrap: "wrap", margin: "4px 0 8px" }}>
+        {SERIES.map((x) => <span key={x.key}><span style={{ display: "inline-block", width: 14, height: 2, background: x.color, verticalAlign: "middle", marginRight: 6 }} />{x.label}</span>)}
+      </div>
+      {jr.rows.length > 1 ? <EquityChart rows={jr.rows} /> : <p className="muted">One night recorded so far; the curve appears from the second.</p>}
+      <div className="grid" style={{ margin: "12px 0" }}>
+        <div className="stat"><div className="k">After-tax return 3 / 6 / 12 mo</div><div className="v">{pct(r.m3, 1, 100)} · {pct(r.m6, 1, 100)} · {pct(r.m12, 1, 100)}</div></div>
+        <div className="stat"><div className="k">SPY · MTUM 12 mo</div><div className="v">{pct(r.spy12, 1, 100)} · {pct(r.mtum12, 1, 100)}</div></div>
+        <div className="stat"><div className="k">Turnover (12 mo)</div><div className="v">{s.turnover12m != null ? `${num(s.turnover12m, 2)}×` : "—"}</div></div>
+        <div className="stat"><div className="k">Win rate · avg R · avg days</div><div className="v">{pct(s.winRate, 0, 100)} · {num(s.avgR, 2)} · {num(s.avgDaysHeld, 0)}</div></div>
+      </div>
+      {last && (
+        <p className="muted">
+          {last.d}: value {money(last.strategy_value, 0)} (open {money(last.open_value, 0)} + realized {money(last.realized, 0)} + cash {money(last.cash, 0)}),
+          after tax {money(last.after_tax_value, 0)}. Realized YTD: ST {money(last.realized_st_ytd, 0)}, LT {money(last.realized_lt_ytd, 0)}. {s.trades} closed lots.
+        </p>
+      )}
+      <details className="panel">
+        <summary>Table</summary>
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>Date</th><th>Strategy</th><th>After tax</th><th>SPY</th><th>MTUM</th><th>m</th></tr></thead>
+            <tbody>{[...jr.rows].reverse().slice(0, 60).map((x) => (
+              <tr key={x.d}><td>{x.d}</td><td>{money(x.strategy_value, 0)}</td><td>{money(x.after_tax_value, 0)}</td><td>{money(x.spy_value, 0)}</td><td>{money(x.mtum_value, 0)}</td><td>{num(x.vol_scale, 2)}</td></tr>
+            ))}</tbody>
+          </table>
+        </div>
+      </details>
     </>
   );
 }

@@ -10,6 +10,8 @@ import { tickerSectors } from "./sector-db";
 import { sectorLabel } from "./sector-key";
 import { manualWarnings } from "./manual-rules";
 import { recordFill } from "./tickets";
+import { closedLots, washOnBuy } from "./positions";
+import { washBlocked } from "./risk";
 
 export type ManualPreview = {
   ticker: string; name: string | null; holding: boolean; close: number | null; atr: number | null; D: number | null;
@@ -88,6 +90,8 @@ export async function previewManual(tickerIn: string, priceIn?: number, sharesIn
     : positionShares(target, price, D, c.cfg).shares;
   const shares = sharesIn && sharesIn > 0 ? sharesIn : ticket?.shares ?? (suggested && suggested > 0 ? suggested : null);
   const sameSector = [...c.held.values()].filter((h) => h.sector === sector && h.ticker !== ticker);
+  const today = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" }).format(new Date());
+  const washSince = washBlocked(await closedLots(), today, c.cfg.wash_sale_block_days).get(ticker) ?? null;
   // A strategy buy order already passed every rule when it was created.
   const warnings = shares == null || ticket ? [] : manualWarnings({
     holding: base.holding, inUniverse: !!c.snap, entryOk: !!c.snap?.entry_ok, riskOn: (c.run?.regime as { riskOn?: boolean } | null)?.riskOn ?? null,
@@ -95,7 +99,7 @@ export async function previewManual(tickerIn: string, priceIn?: number, sharesIn
     // Other names in the sector, plus this one (already held or new), at its value after the add.
     sectorNamesAfter: sameSector.length + 1,
     sectorDollarsAfter: sameSector.reduce((a, h) => a + h.value, 0) + base.valueBefore + shares * price,
-    shares, price, D, target, valueBefore: base.valueBefore,
+    shares, price, D, target, valueBefore: base.valueBefore, washSaleSince: washSince,
   }, c.cfg);
   return { ...base, close: c.m.close, atr: c.m.atr, D, target, suggestedShares: suggested, warnings, price, shares };
 }
@@ -124,7 +128,7 @@ export async function addManualLot(ticker: string, F: number, shares: number, fi
     sigma63: c.m?.sigma ?? null, atr20: p.atr, regime: riskOn == null ? "unknown" : riskOn ? "risk-on" : "risk-off",
     b: c.cfg.B, e: c.cfg.E, i: c.I, n: c.N, t_target: p.target, shares, fill_price: F, filled_at: filledAt,
     d: lv.D, stop0: lv.stop0, stop: lv.stop0, highest_close: F, disaster_stop: lv.disaster,
-    earnings_date: er?.[0]?.report_date ?? null, lt_date: lv.ltDate,
+    earnings_date: er?.[0]?.report_date ?? null, lt_date: lv.ltDate, wash_sale: await washOnBuy(p.ticker, day),
     slippage_s_bps: p.close ? Math.round((F / p.close - 1) * 100_000) / 10 : null,
     rule_broken: p.warnings.length > 0,
     rule_note: [p.holding ? "Added shares by hand." : "Added by hand.", ...p.warnings].join(" "),
