@@ -14,7 +14,8 @@ const KEEP_TYPES = new Set(["CS", "ETF", "ADRC"]);
 const MIN_PRICE = 1;
 /** Bars above this were skipped before the cap was removed; the backfill fills them in once. */
 const OLD_MAX_PRICE = 75;
-const HISTORY_DAYS = 400;
+// ~260 trading days for the whole market (ss_prune_bars keeps the same); liquid names keep LONG_HISTORY_DAYS.
+const HISTORY_DAYS = 380;
 /** Liquid names (the momentum pool) keep more history: 273+ trading days plus holidays and slack. */
 export const LONG_HISTORY_DAYS = 460;
 /** Market-regime benchmark for strategies that require SPY above its 200-day SMA. */
