@@ -312,10 +312,11 @@ export async function fundamentalsBatch(count = 2) {
       composite_figi: details?.composite_figi ?? null,
       updated_at: new Date().toISOString(),
     }).eq("ticker", ticker);
-    // Only fill sector/industry from SIC when we have nothing better (S&P names carry GICS).
+    // Non-S&P names take their sector from SIC (recomputed each fetch so mapping fixes apply);
+    // S&P names keep their GICS sector and industry.
     await db().from("ss_tickers")
       .update({ sector: sectorFromSic(details?.sic_code), industry: details?.sic_description ?? null })
-      .eq("ticker", ticker).is("sector", null);
+      .eq("ticker", ticker).eq("in_sp500", false);
 
     await db().from("ss_fundamentals").upsert({
       ticker,

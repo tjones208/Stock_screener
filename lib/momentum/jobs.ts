@@ -9,6 +9,7 @@ import { isMonthEnd, isWeekEnd, nextTradingDay, type Calendar } from "./calendar
 import { advanceTickets, createTickets } from "./tickets";
 import { exitReview, updateStops } from "./positions";
 import { refreshCallIdeas, settleExpiredCalls } from "./covered";
+import { tickerSectors } from "./sector-db";
 import { regimeAt, type Regime } from "./regime";
 import { buyoutHits } from "./news";
 
@@ -136,6 +137,7 @@ export async function momentumBuild(t?: string) {
   const { N } = capitalAndSlots(cfg);
   const { data, error } = await db().rpc("ss_mom_build", { p_t: latest, p_kind: kind, p_cfg: cfg, p_n: N });
   if (error) throw new Error(`ss_mom_build: ${error.message}`);
+  const sectors = await storeSnapshotSectors(latest);
   const regime: Regime = regimeAt(await spyBars(latest), latest, cal, cfg.regime_sma_months);
   await db().from("ss_mom_runs").update({ regime }).eq("signal_date", latest).eq("kind", kind);
   // Tickets work the next session: roll unfilled ones forward first, then add this plan's buys.
@@ -149,5 +151,16 @@ export async function momentumBuild(t?: string) {
   const tickets = kind === "daily" ? null : await createTickets(latest, kind, cfg, regime.riskOn, tradeDay, cal);
   // Covered-call suggestions for the session (after exits, so positions being sold are skipped).
   const callIdeas = await refreshCallIdeas(tradeDay, cfg, cal).catch((e) => ({ error: String(e) }));
-  return { signalDate: latest, kind, N, tradeDay, regime: { riskOn: regime.riskOn, close: regime.close, sma: regime.sma }, stops, calls, exits, advanced, tickets, callIdeas, ...(data as object) };
+  return { signalDate: latest, kind, N, tradeDay, regime: { riskOn: regime.riskOn, close: regime.close, sma: regime.sma }, stops, calls, exits, advanced, tickets, callIdeas, sectors, ...(data as object) };
+}
+
+/** Record the GICS sector bucket (momSector) on each snapshot row of signal date t; sic2 stays for reference. */
+async function storeSnapshotSectors(t: string) {
+  const rows = await fetchAll<{ ticker: string }>((a, b) => db().from("ss_mom_snapshots").select("ticker").eq("signal_date", t).range(a, b));
+  const sectors = await tickerSectors(rows.map((r) => r.ticker));
+  // Only the sector column is sent, so the upsert leaves every other column as the build wrote it.
+  await upsertChunks("ss_mom_snapshots", rows.map((r) => ({ signal_date: t, ticker: r.ticker, sector: sectors.get(r.ticker) })), "signal_date,ticker");
+  const counts: Record<string, number> = {};
+  for (const v of sectors.values()) { const k = v.startsWith("unknown:") ? "unknown" : v; counts[k] = (counts[k] ?? 0) + 1; }
+  return counts;
 }

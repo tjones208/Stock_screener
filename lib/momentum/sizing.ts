@@ -1,9 +1,11 @@
 // Position sizing and buy-list selection (spec sections 6 and 7.1–7.5). Pure; used by the page and tests.
 import { capitalAndSlots, type MomConfig } from "./config.ts";
 
-/** Stocks with no SIC code share one sector bucket for the sector caps. */
-export const UNKNOWN_SECTOR = "unknown";
-export const sectorOf = (sic2: string | null | undefined) => sic2 || UNKNOWN_SECTOR;
+/**
+ * Sector-cap bucket: the GICS sector from momSector() (sector-key.ts). A missing sector becomes
+ * "unknown:TICKER", its own bucket, so unknowns neither share a cap nor block each other.
+ */
+export const sectorBucket = (x: { ticker: string; sector: string | null | undefined }) => x.sector || `unknown:${x.ticker}`;
 
 /**
  * Inverse-volatility weights clamped to [floor/n, cap/n]: clamp, renormalize to sum 1, repeat until
@@ -50,9 +52,10 @@ export function positionShares(T: number, LP: number, D: number, cfg: Pick<MomCo
 
 export type Candidate = {
   ticker: string; comp_rank: number; close: number; sigma63: number | null; atr20: number | null;
-  sic2: string | null; entry_ok: boolean;
+  /** GICS sector key from momSector(); sic2 is kept on snapshots for reference only. */
+  sector: string | null; entry_ok: boolean;
 };
-export type Held = { ticker: string; sigma63: number | null; sic2: string | null; value: number };
+export type Held = { ticker: string; sigma63: number | null; sector: string | null; value: number };
 
 export type PlannedBuy = {
   ticker: string; comp_rank: number; sector: string; sigma63: number; w: number; T: number;
@@ -120,7 +123,7 @@ export function planPortfolio(args: {
       const D = stopDistance(p.atr20!, cap, cfg);
       const s = positionShares(T[j], cap, D, cfg);
       return {
-        ticker: p.ticker, comp_rank: p.comp_rank, sector: sectorOf(p.sic2), sigma63: p.sigma63!, w: w[j], T: T[j],
+        ticker: p.ticker, comp_rank: p.comp_rank, sector: sectorBucket(p), sigma63: p.sigma63!, w: w[j], T: T[j],
         S: p.close, cap, D, byTarget: s.byTarget, byRisk: s.byRisk, shares: s.shares, amount: s.shares * cap,
         tooSmall: s.tooSmall,
       } as PlannedBuy & { tooSmall: boolean };
@@ -130,7 +133,7 @@ export function planPortfolio(args: {
   const sectorBreach = (buys: PlannedBuy[]): string | null => {
     const names = new Map<string, number>(), dollars = new Map<string, number>();
     for (const h of held) {
-      const s = sectorOf(h.sic2);
+      const s = sectorBucket(h);
       names.set(s, (names.get(s) ?? 0) + 1);
       dollars.set(s, (dollars.get(s) ?? 0) + h.value);
     }
@@ -158,8 +161,8 @@ export function planPortfolio(args: {
   const final = size(picks);
   // Alternates: the next names that wouldn't break the sector name cap against the final list.
   const sectorNames = new Map<string, number>();
-  for (const s of [...held.map((h) => sectorOf(h.sic2)), ...final.buys.map((b) => b.sector)]) sectorNames.set(s, (sectorNames.get(s) ?? 0) + 1);
-  const alternates = rest.filter((c) => (sectorNames.get(sectorOf(c.sic2)) ?? 0) < cfg.sector_max_names).slice(0, cfg.alternates);
+  for (const s of [...held.map(sectorBucket), ...final.buys.map((b) => b.sector)]) sectorNames.set(s, (sectorNames.get(s) ?? 0) + 1);
+  const alternates = rest.filter((c) => (sectorNames.get(sectorBucket(c)) ?? 0) < cfg.sector_max_names).slice(0, cfg.alternates);
 
   return {
     I, N, n: held.length + picks.length, openSlots,

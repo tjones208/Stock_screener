@@ -5,7 +5,9 @@ import { db } from "../db";
 import { capitalAndSlots } from "./config";
 import { getMomConfig } from "./jobs";
 import { fillLevels } from "./orders";
-import { planPortfolio, positionShares, sectorOf, stopDistance, type Held } from "./sizing";
+import { planPortfolio, positionShares, stopDistance, type Held } from "./sizing";
+import { tickerSectors } from "./sector-db";
+import { sectorLabel } from "./sector-key";
 import { manualWarnings } from "./manual-rules";
 import { recordFill } from "./tickets";
 
@@ -43,17 +45,17 @@ async function context(ticker: string) {
     const r = (data as { close: number; atr: number | null; sigma: number | null }[] | null)?.[0];
     if (r) m = { close: r.close, atr: r.atr, sigma: r.sigma };
   }
-  const { data: sics } = await db().from("ss_tickers").select("ticker, sic_code").in("ticker", [...new Set((lots ?? []).map((l) => l.ticker))]);
-  const sic = new Map((sics ?? []).map((x) => [x.ticker, x.sic_code as string | null]));
+  // GICS sector keys for the holdings and for this ticker (same buckets the strategy's caps use).
+  const sectors = await tickerSectors([...(lots ?? []).map((l) => l.ticker as string), ticker]);
   const { data: closes } = await db().from("ss_indicators").select("ticker, close").in("ticker", [...new Set((lots ?? []).map((l) => l.ticker))]);
   const last = new Map((closes ?? []).map((x) => [x.ticker, x.close as number]));
   const held = new Map<string, Held>();
   for (const l of lots ?? []) {
-    const h = held.get(l.ticker) ?? { ticker: l.ticker, sigma63: l.sigma63, sic2: sic.get(l.ticker)?.slice(0, 2) ?? null, value: 0 };
+    const h = held.get(l.ticker) ?? { ticker: l.ticker, sigma63: l.sigma63, sector: sectors.get(l.ticker)!, value: 0 };
     h.value += l.shares * (last.get(l.ticker) ?? l.fill_price);
     held.set(l.ticker, h);
   }
-  return { cfg, I, N, run, t, tk, snap, m, held };
+  return { cfg, I, N, run, t, tk, snap, m, held, sector: sectors.get(ticker)! };
 }
 
 /** Everything the add form shows before you confirm: suggested shares and the rule warnings. */
@@ -75,23 +77,24 @@ export async function previewManual(tickerIn: string, priceIn?: number, sharesIn
   }
   const price = priceIn && priceIn > 0 ? priceIn : ticket?.lp1 ?? c.m.close;
   const D = stopDistance(c.m.atr, price, c.cfg);
-  const sector = sectorOf(c.snap?.sic2 ?? c.tk.sic_code?.slice(0, 2));
+  const sector = c.sector;
   // Target T with this stock in the portfolio (same sizing as the strategy's own buys).
   const heldList = [...c.held.values()];
-  const withIt = base.holding ? heldList : [...heldList, { ticker, sigma63: c.m.sigma, sic2: c.snap?.sic2 ?? c.tk.sic_code?.slice(0, 2) ?? null, value: 0 }];
+  const withIt = base.holding ? heldList : [...heldList, { ticker, sigma63: c.m.sigma, sector, value: 0 }];
   const plan = planPortfolio({ cfg: c.cfg, candidates: [], held: withIt, riskOn: true });
   const target = plan.heldWeights.find((h) => h.ticker === ticker)?.T ?? null;
   const suggested = target == null ? null : base.holding
     ? Math.max(0, Math.floor((target - base.valueBefore) / price))
     : positionShares(target, price, D, c.cfg).shares;
   const shares = sharesIn && sharesIn > 0 ? sharesIn : ticket?.shares ?? (suggested && suggested > 0 ? suggested : null);
-  const sameSector = [...c.held.values()].filter((h) => sectorOf(h.sic2) === sector);
+  const sameSector = [...c.held.values()].filter((h) => h.sector === sector && h.ticker !== ticker);
   // A strategy buy order already passed every rule when it was created.
   const warnings = shares == null || ticket ? [] : manualWarnings({
     holding: base.holding, inUniverse: !!c.snap, entryOk: !!c.snap?.entry_ok, riskOn: (c.run?.regime as { riskOn?: boolean } | null)?.riskOn ?? null,
-    rebalanceDay: c.run?.kind === "monthly", heldCount: c.held.size, N: c.N, I: c.I, sector,
-    sectorNamesAfter: sameSector.length + (base.holding ? 0 : 1),
-    sectorDollarsAfter: sameSector.reduce((a, h) => a + h.value, 0) + shares * price,
+    rebalanceDay: c.run?.kind === "monthly", heldCount: c.held.size, N: c.N, I: c.I, sector: sectorLabel(sector),
+    // Other names in the sector, plus this one (already held or new), at its value after the add.
+    sectorNamesAfter: sameSector.length + 1,
+    sectorDollarsAfter: sameSector.reduce((a, h) => a + h.value, 0) + base.valueBefore + shares * price,
     shares, price, D, target, valueBefore: base.valueBefore,
   }, c.cfg);
   return { ...base, close: c.m.close, atr: c.m.atr, D, target, suggestedShares: suggested, warnings, price, shares };

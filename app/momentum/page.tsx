@@ -5,6 +5,8 @@ import { capitalAndSlots, MOM_FIELDS } from "@/lib/momentum/config";
 import { getMomConfig, loadCalendar } from "@/lib/momentum/jobs";
 import { addTradingDays } from "@/lib/momentum/calendar";
 import { planPortfolio, type Candidate, type Plan } from "@/lib/momentum/sizing";
+import { tickerSectors, withSectors } from "@/lib/momentum/sector-db";
+import { sectorLabel } from "@/lib/momentum/sector-key";
 import type { Regime } from "@/lib/momentum/regime";
 import { addPosition, assignCall, buyBackCall, expireCall, sellCall, clearFlag, dropTicket, exitTicket, fillTicket, markDisasterPosted, quoteExits, quoteTickets, saveMomConfig, undoLot, uploadEarnings } from "./actions";
 import { previewManual, type ManualPreview } from "@/lib/momentum/manual";
@@ -42,6 +44,7 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
     db().from("ss_splits").select("ticker", { count: "exact", head: true }).eq("needs_repair", true).is("repaired_at", null),
   ]);
   const rows = (snap.data ?? []) as Snap[];
+  const rowSectors = await tickerSectors(rows.map((r) => r.ticker));
   const [{ data: openTix }, { data: altTix }, { data: doneTix }] = await Promise.all([
     db().from("ss_mom_tickets").select("*").eq("side", "buy").eq("status", "open").order("trade_date").order("comp_rank"),
     db().from("ss_mom_tickets").select("*").eq("side", "buy").eq("status", "alternate").order("signal_date", { ascending: false }).order("alt_order"),
@@ -188,7 +191,7 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
             <thead>
               <tr>
                 <th>Rank</th><th>Ticker</th><th>Status</th><th>Close</th><th>MOM</th><th>H52</th><th>Days since high</th><th>MOM pct</th><th>H52 pct</th>
-                <th>Composite</th><th>σ63</th><th>ATR20</th><th>Mkt cap</th><th>SIC</th><th>Entry</th><th>Hold</th><th></th>
+                <th>Composite</th><th>σ63</th><th>ATR20</th><th>Mkt cap</th><th>Sector</th><th>SIC</th><th>Entry</th><th>Hold</th><th></th>
               </tr>
             </thead>
             <tbody>
@@ -207,7 +210,8 @@ export default async function Momentum({ searchParams }: { searchParams: Promise
                   <td>{pct(r.sigma63, 0, 100)}</td>
                   <td>{num(r.atr20)}</td>
                   <td>{big(r.market_cap)}</td>
-                  <td>{r.sic2 ?? "—"}</td>
+                  <td style={{ textAlign: "left" }}>{sectorLabel(rowSectors.get(r.ticker))}</td>
+                  <td className="muted">{r.sic2 ?? "—"}</td>
                   <td>{r.entry_ok ? <span className="up">✓</span> : <span className="muted">—</span>}</td>
                   <td>{r.hold_ok ? <span className="up">✓</span> : <span className="muted">—</span>}</td>
                   <td><AddLink ticker={r.ticker} held={status.get(r.ticker) === "held"} /></td>
@@ -380,7 +384,7 @@ function FlagTable({ flags }: { flags: Flag[] }) {
 
 async function buildPlan(t: string, cfg: Awaited<ReturnType<typeof getMomConfig>>, riskOn: boolean | null): Promise<Plan> {
   const [{ data: cands }, cal] = await Promise.all([
-    db().from("ss_mom_snapshots").select("ticker, comp_rank, close, sigma63, atr20, sic2, entry_ok")
+    db().from("ss_mom_snapshots").select("ticker, comp_rank, close, sigma63, atr20, entry_ok")
       .eq("signal_date", t).eq("entry_ok", true).order("comp_rank").limit(1000),
     loadCalendar(),
   ]);
@@ -388,7 +392,8 @@ async function buildPlan(t: string, cfg: Awaited<ReturnType<typeof getMomConfig>
   const until = addTradingDays(cal, t, cfg.earnings_blackout_days);
   const { data: rep } = await db().from("ss_earnings_calendar").select("ticker").gt("report_date", t).lte("report_date", until);
   // Holdings and wash-sale blocks come from the journal (build step 8); none are recorded yet.
-  return planPortfolio({ cfg, candidates: (cands ?? []) as Candidate[], riskOn, earnings: new Set((rep ?? []).map((r) => r.ticker)) });
+  const candidates: Candidate[] = await withSectors((cands ?? []) as Omit<Candidate, "sector">[]);
+  return planPortfolio({ cfg, candidates, riskOn, earnings: new Set((rep ?? []).map((r) => r.ticker)) });
 }
 
 function PlanSection({ plan, kind, signalDate, chase, risk, equity }: { plan: Plan; kind?: string; signalDate?: string; chase: number; risk: number; equity: number }) {
@@ -419,7 +424,7 @@ function PlanSection({ plan, kind, signalDate, chase, risk, equity }: { plan: Pl
                 <tr key={b.ticker}>
                   <td><Link href={`/t/${b.ticker}`}><b>{b.ticker}</b></Link></td>
                   <td>{b.comp_rank}</td>
-                  <td>{b.sector}</td>
+                  <td>{sectorLabel(b.sector)}</td>
                   <td>{pct(b.sigma63, 0, 100)}</td>
                   <td>{pct(b.w, 2, 100)}</td>
                   <td>{money(b.T)}</td>

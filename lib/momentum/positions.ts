@@ -5,6 +5,7 @@ import type { MomConfig } from "./config";
 import { addTradingDays, tradingDaysBetween, type Calendar } from "./calendar";
 import { entryCap, planPortfolio, type Candidate, type Held } from "./sizing";
 import { callsToClose } from "./calls";
+import { tickerSectors } from "./sector-db";
 import { disasterStop, exitResult, reviewPosition, topUpShares, trailStop, type Lot, type Position } from "./stops";
 
 export type LotRow = Lot & {
@@ -51,8 +52,8 @@ export async function exitReview(t: string, monthEnd: boolean, riskOn: boolean |
   const tickers = [...new Set(lots.map((l) => l.ticker))];
   const [{ data: bars }, { data: tk }, { data: snap }, { data: flags }, { data: openSells }] = await Promise.all([
     db().from("ss_daily_bars").select("ticker, c").eq("d", t).in("ticker", tickers),
-    db().from("ss_tickers").select("ticker, active, sic_code").in("ticker", tickers),
-    db().from("ss_mom_snapshots").select("ticker, hold_ok, entry_ok, close, sigma63, atr20, sic2, comp_rank").eq("signal_date", t).in("ticker", tickers),
+    db().from("ss_tickers").select("ticker, active").in("ticker", tickers),
+    db().from("ss_mom_snapshots").select("ticker, hold_ok, entry_ok, close, sigma63, atr20, comp_rank").eq("signal_date", t).in("ticker", tickers),
     db().from("ss_data_flags").select("ticker, d").eq("kind", "buyout_news").eq("cleared", false).in("ticker", tickers),
     db().from("ss_mom_tickets").select("ticker").eq("side", "sell").eq("status", "open"),
   ]);
@@ -65,10 +66,11 @@ export async function exitReview(t: string, monthEnd: boolean, riskOn: boolean |
 
   // Month-end targets for kept holdings (trim / top-up) come from the same sizing as new buys.
   const targets = new Map<string, number>();
+  const sectors = await tickerSectors(tickers);
   if (monthEnd) {
     const held: Held[] = tickers.map((tk2) => ({
       ticker: tk2, sigma63: s.get(tk2)?.sigma63 ?? lots.find((l) => l.ticker === tk2)?.sigma63 ?? null,
-      sic2: info.get(tk2)?.sic_code?.slice(0, 2) ?? null,
+      sector: sectors.get(tk2)!,
       value: lots.filter((l) => l.ticker === tk2).reduce((a, l) => a + l.shares, 0) * (close.get(tk2) ?? 0),
     }));
     const plan = planPortfolio({ cfg, candidates: [] as Candidate[], held, riskOn: true });
@@ -98,7 +100,7 @@ export async function exitReview(t: string, monthEnd: boolean, riskOn: boolean |
       const sn = s.get(tick);
       if (add > 0 && sn && p.close != null) {
         await db().from("ss_mom_tickets").upsert({
-          signal_date: t, kind: "topup", side: "buy", ticker: tick, status: "open", comp_rank: sn.comp_rank, sector: sn.sic2 ?? "unknown",
+          signal_date: t, kind: "topup", side: "buy", ticker: tick, status: "open", comp_rank: sn.comp_rank, sector: sectors.get(tick)!,
           sigma63: sn.sigma63, atr20: sn.atr20, t_target: add * p.close, s_close: p.close, cap: entryCap(p.close, cfg),
           planned_shares: add, trade_date: tradeDay, note: `Top-up: under ${cfg.topup_below_mult}× its target ${targets.get(tick)?.toFixed(0)}`,
         }, { onConflict: "signal_date,kind,side,ticker" });

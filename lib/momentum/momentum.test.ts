@@ -111,29 +111,30 @@ test("weight clamp converges to the band and sums to 1", () => {
 });
 
 const cand = (ticker: string, comp_rank: number, o: Partial<Candidate> = {}): Candidate => ({
-  ticker, comp_rank, close: 50, sigma63: 0.3, atr20: 1.5, sic2: "28", entry_ok: true, ...o,
+  ticker, comp_rank, close: 50, sigma63: 0.3, atr20: 1.5, sector: "Health Care", entry_ok: true, ...o,
 });
 
-test("plan: sector name cap skips the 5th name; unknown SIC is one bucket; alternates follow", () => {
+test("plan: sector name cap skips the 5th name; unknown sectors are separate buckets; alternates follow", () => {
   const cfg = { ...MOM_DEFAULTS, B: 20_000 };
-  // Lower-ranked, higher-volatility SIC 28 names carry small weights, so the name cap (not the
+  // Lower-ranked, higher-volatility Health Care names carry small weights, so the name cap (not the
   // dollar cap) is what stops the fifth one.
   const c = [
-    ...Array.from({ length: 6 }, (_, i) => cand(`X${i}`, 1 + i, { sic2: String(40 + i) })),
-    cand("F", 7, { sic2: null }), cand("G", 8, { sic2: null }),
+    ...Array.from({ length: 6 }, (_, i) => cand(`X${i}`, 1 + i, { sector: `S${40 + i}` })),
+    cand("F", 7, { sector: null }), cand("G", 8, { sector: null }),
     cand("A", 9, { sigma63: 0.9 }), cand("B", 10, { sigma63: 0.9 }), cand("C", 11, { sigma63: 0.9 }),
     cand("D", 12, { sigma63: 0.9 }), cand("E", 13, { sigma63: 0.9 }),
-    ...Array.from({ length: 8 }, (_, i) => cand(`Z${i}`, 14 + i, { sic2: String(60 + i) })),
-    cand("W", 30), // another SIC 28 name: not offered as an alternate once the sector is full
+    ...Array.from({ length: 8 }, (_, i) => cand(`Z${i}`, 14 + i, { sector: `S${60 + i}` })),
+    cand("W", 30), // another Health Care name: not offered as an alternate once the sector is full
   ];
   const p = planPortfolio({ cfg, candidates: c, riskOn: true });
   assert.equal(p.N, 13);
   assert.equal(p.buys.length, 13);
-  assert.deepEqual(p.buys.filter((b) => b.sector === "28").map((b) => b.ticker), ["A", "B", "C", "D"]);
+  assert.deepEqual(p.buys.filter((b) => b.sector === "Health Care").map((b) => b.ticker), ["A", "B", "C", "D"]);
   assert.match(p.skipped.find((s) => s.ticker === "E")!.reason, /more than 4 names/);
-  assert.deepEqual(p.buys.filter((b) => b.sector === "unknown").map((b) => b.ticker), ["F", "G"]);
+  // Each unknown-sector name is its own bucket.
+  assert.deepEqual(p.buys.filter((b) => b.sector.startsWith("unknown:")).map((b) => b.sector), ["unknown:F", "unknown:G"]);
   assert.equal(p.alternates.length, 5);
-  assert.ok(p.alternates.every((a) => a.sic2 !== "28"));
+  assert.ok(p.alternates.every((a) => a.sector !== "Health Care"));
   // Targets never scale up past I and every position fits the risk cap.
   assert.ok(p.buys.reduce((s, b) => s + b.amount, 0) <= p.I + 1e-6);
   for (const b of p.buys) assert.ok(b.shares * b.D <= cfg.max_risk_pct_of_E * cfg.E + 1e-6);
@@ -142,15 +143,15 @@ test("plan: sector name cap skips the 5th name; unknown SIC is one bucket; alter
 test("plan: sector dollar cap, rule 6.7 skip, earnings watch, risk-off", () => {
   const cfg = { ...MOM_DEFAULTS, B: 20_000 };
   // 30% of I = $5,880. Low-σ names get big weights; three of them in one sector would breach.
-  const low = (t: string, r: number) => cand(t, r, { sigma63: 0.1, sic2: "60" });
-  const others = Array.from({ length: 12 }, (_, i) => cand(`Y${i}`, 10 + i, { sigma63: 0.6, sic2: String(70 + i) }));
+  const low = (t: string, r: number) => cand(t, r, { sigma63: 0.1, sector: "Financials" });
+  const others = Array.from({ length: 12 }, (_, i) => cand(`Y${i}`, 10 + i, { sigma63: 0.6, sector: `S${70 + i}` }));
   const p = planPortfolio({ cfg, candidates: [low("L1", 1), low("L2", 2), low("L3", 3), ...others], riskOn: true });
-  const inSector = p.buys.filter((b) => b.sector === "60");
+  const inSector = p.buys.filter((b) => b.sector === "Financials");
   assert.ok(inSector.reduce((s, b) => s + b.amount, 0) <= 0.3 * p.I + 1e-6);
   assert.ok(p.skipped.some((s) => /over 30% of I/.test(s.reason)));
 
   // A $2,000 stock can't be bought at all with a ~$1,500 target in whole shares → skipped.
-  const pricey = planPortfolio({ cfg, candidates: [cand("BRK", 1, { close: 2000, atr20: 30, sic2: "63" }), ...others], riskOn: true });
+  const pricey = planPortfolio({ cfg, candidates: [cand("BRK", 1, { close: 2000, atr20: 30, sector: "S63" }), ...others], riskOn: true });
   assert.match(pricey.skipped.find((s) => s.ticker === "BRK")!.reason, /too small/);
   assert.ok(!planPortfolio({ cfg: { ...cfg, fractional_shares: true }, candidates: [cand("BRK", 1, { close: 2000, atr20: 30 })], riskOn: true })
     .skipped.some((s) => s.ticker === "BRK"));
@@ -322,4 +323,63 @@ test("morning push lists likely covered-call assignments", () => {
   const m = formatSellPush("2026-10-19", [], 13, [{ ticker: "DRH", contracts: 1, strike: 14 }]);
   assert.equal(m.title, "Momentum Mon, Oct 19: 1 covered call assigned?");
   assert.equal(m.body, "CALLED AWAY? DRH 100 sh at 14: confirm on the Momentum tab");
+});
+
+import { momSector, sectorLabel } from "./sector-key.ts";
+import { sectorFromSic } from "../sectors.ts";
+
+test("GICS sector keys: S&P GICS first, then 4-digit SIC, then 2-digit, else a per-ticker unknown", () => {
+  // SIC 3826 (lab analytical instruments: TXG, BRKR) is Health Care, not IT — even with a stale IT label.
+  assert.equal(sectorFromSic("3826"), "Health Care");
+  assert.equal(momSector({ ticker: "TXG", in_sp500: false, sector: "Information Technology", sic_code: "3826" }), "Health Care");
+  for (const sic of ["2833", "2834", "2836", "3841", "3845", "3851", "5047", "5122", "8000", "8071", "8099", "8731"]) {
+    assert.equal(sectorFromSic(sic), "Health Care", sic);
+  }
+  // S&P 500 names use their real GICS sector even when the SIC would say otherwise.
+  assert.equal(momSector({ ticker: "X", in_sp500: true, sector: "Financials", sic_code: "2834" }), "Financials");
+  // No 4-digit code: the 2-digit group; nothing at all: its own bucket.
+  assert.equal(momSector({ ticker: "Y", sic2: "13" }), "Energy");
+  assert.equal(momSector({ ticker: "AAA" }), "unknown:AAA");
+  assert.notEqual(momSector({ ticker: "AAA" }), momSector({ ticker: "BBB" }));
+  assert.equal(sectorLabel("unknown:AAA"), "Unknown");
+});
+
+test("six Health Care names under SIC 28, 38 and 80 (and S&P GICS) → only 4 bought, the rest skipped for the sector", () => {
+  const cfg = { ...MOM_DEFAULTS, B: 20_000 };
+  const hc = [
+    { ticker: "TWST", sic_code: "2836" }, { ticker: "ABCL", sic_code: "2834" }, { ticker: "TXG", sic_code: "3826", sector: "Information Technology" },
+    { ticker: "ILMN", sic_code: "3826", in_sp500: true, sector: "Health Care" }, { ticker: "CDNA", sic_code: "8071" }, { ticker: "NTRA", sic_code: "8071" },
+  ];
+  const sectorsSeen = new Set(hc.map((h) => (h.sic_code ?? "").slice(0, 2)));
+  assert.deepEqual([...sectorsSeen].sort(), ["28", "38", "80"]);
+  const others = ["Information Technology", "Information Technology", "Industrials", "Industrials", "Energy", "Financials", "Utilities", "Materials"]
+    .map((sector, i) => cand(`O${i}`, 1 + i, { sector }));
+  const late = ["Consumer Staples", "Real Estate", "Communication Services"].map((sector, i) => cand(`L${i}`, 20 + i, { sector }));
+  const candidates = [
+    ...others,
+    ...hc.map((h, i) => cand(h.ticker, 9 + i, { sigma63: 0.9, sector: momSector(h) })),
+    ...late,
+  ];
+  const p = planPortfolio({ cfg, candidates, riskOn: true });
+  const boughtHc = p.buys.filter((b) => b.sector === "Health Care");
+  assert.equal(boughtHc.length, 4);
+  assert.deepEqual(boughtHc.map((b) => b.ticker), ["TWST", "ABCL", "TXG", "ILMN"]);
+  const skippedHc = p.skipped.filter((s) => ["CDNA", "NTRA"].includes(s.ticker));
+  assert.equal(skippedHc.length, 2);
+  for (const s of skippedHc) assert.match(s.reason, /^Sector Health Care: /);
+  // The freed slot goes to the next name in another sector.
+  assert.equal(p.buys.length, 13);
+  assert.ok(p.buys.some((b) => b.ticker === "L0"));
+  assert.ok(boughtHc.reduce((a, b) => a + b.amount, 0) <= cfg.sector_max_pct_of_I * p.I + 1e-6);
+});
+
+test("unknown-sector names don't share a cap", () => {
+  const cfg = { ...MOM_DEFAULTS, B: 20_000 };
+  // Five names with no sector data: a shared bucket would stop the fifth at the 4-name cap.
+  const unknowns = ["U1", "U2", "U3", "U4", "U5"].map((t, i) => cand(t, 1 + i, { sigma63: 0.9, sector: momSector({ ticker: t }) }));
+  const fill = ["Energy", "Financials", "Utilities", "Materials", "Industrials", "Real Estate", "Consumer Staples", "Communication Services"]
+    .map((sector, i) => cand(`F${i}`, 10 + i, { sector }));
+  const p = planPortfolio({ cfg, candidates: [...unknowns, ...fill], riskOn: true });
+  assert.deepEqual(p.buys.filter((b) => b.sector.startsWith("unknown:")).map((b) => b.ticker), ["U1", "U2", "U3", "U4", "U5"]);
+  assert.ok(!p.skipped.some((s) => s.ticker.startsWith("U")));
 });

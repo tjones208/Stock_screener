@@ -6,6 +6,7 @@ import { capitalAndSlots, type MomConfig } from "./config";
 import { addTradingDays, type Calendar } from "./calendar";
 import { planPortfolio, type Candidate, type Held } from "./sizing";
 import { advanceTicket, fillLevels, type TicketState } from "./orders";
+import { tickerSectors, withSectors } from "./sector-db";
 
 export type Ticket = {
   id: number; signal_date: string; kind: string; side: string; ticker: string; status: TicketState["status"];
@@ -18,10 +19,12 @@ export type Ticket = {
 
 type SnapRow = Candidate & { mom_pct: number; h52: number; days_since_high: number };
 
+/** Snapshot rows with their GICS sector key (resolved now from ss_tickers, so every reader buckets alike). */
 async function snapshot(t: string): Promise<SnapRow[]> {
-  return fetchAll<SnapRow>((a, b) =>
-    db().from("ss_mom_snapshots").select("ticker, comp_rank, close, sigma63, atr20, sic2, entry_ok, mom_pct, h52, days_since_high")
+  const rows = await fetchAll<Omit<SnapRow, "sector">>((a, b) =>
+    db().from("ss_mom_snapshots").select("ticker, comp_rank, close, sigma63, atr20, entry_ok, mom_pct, h52, days_since_high")
       .eq("signal_date", t).order("comp_rank").range(a, b));
+  return withSectors(rows);
 }
 
 /** Open lots plus live buy tickets from other plans: both occupy slots and count toward sector caps. */
@@ -34,10 +37,9 @@ async function occupied(excludePlan?: { signal_date: string; kind: string }): Pr
   // Exit review runs first: positions with an open full-exit ticket (any trigger but a trim) aren't kept.
   const leaving = new Set((sells ?? []).filter((x) => x.exit_trigger !== 7).map((x) => x.ticker));
   const lots = (allLots ?? []).filter((l) => !leaving.has(l.ticker));
-  const { data: tk } = await db().from("ss_tickers").select("ticker, sic_code").in("ticker", lots.map((l) => l.ticker));
-  const sic = new Map((tk ?? []).map((t) => [t.ticker, t.sic_code as string | null]));
+  const sectors = await tickerSectors([...lots.map((l) => l.ticker), ...(tix ?? []).map((t) => t.ticker as string)]);
   const held: Held[] = lots.map((l) => ({
-    ticker: l.ticker, sigma63: l.sigma63, sic2: sic.get(l.ticker)?.slice(0, 2) ?? null, value: l.shares * l.fill_price,
+    ticker: l.ticker, sigma63: l.sigma63, sector: sectors.get(l.ticker)!, value: l.shares * l.fill_price,
   }));
   // Several lots of one ticker (top-ups) are one holding.
   const merged = new Map<string, Held>();
@@ -48,7 +50,8 @@ async function occupied(excludePlan?: { signal_date: string; kind: string }): Pr
   held.splice(0, held.length, ...merged.values());
   for (const t of tix ?? []) {
     if (excludePlan && t.signal_date === excludePlan.signal_date && t.kind === excludePlan.kind) continue;
-    held.push({ ticker: t.ticker, sigma63: t.sigma63, sic2: t.sector === "unknown" ? null : t.sector, value: t.t_target ?? 0 });
+    // Re-resolved rather than read from the ticket, so tickets made before GICS buckets still count right.
+    held.push({ ticker: t.ticker, sigma63: t.sigma63, sector: sectors.get(t.ticker)!, value: t.t_target ?? 0 });
   }
   return held;
 }
@@ -88,7 +91,7 @@ export async function createTickets(t: string, kind: "weekly" | "monthly", cfg: 
       risk_cap_shares: b.byRisk, trade_date: tradeDay,
     })),
     ...plan.alternates.map((a, i) => ({
-      status: "alternate", alt_order: i + 1, ticker: a.ticker, comp_rank: a.comp_rank, sector: a.sic2 ?? "unknown", sigma63: a.sigma63,
+      status: "alternate", alt_order: i + 1, ticker: a.ticker, comp_rank: a.comp_rank, sector: a.sector, sigma63: a.sigma63,
       atr20: a.atr20, w: null, t_target: null, s_close: a.close, cap: null, planned_shares: null, risk_cap_shares: null, trade_date: null,
     })),
   ].map((r) => {
