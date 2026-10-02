@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "tsc --noEmit",
-    "test": "node --test --experimental-strip-types lib/*.test.ts lib/momentum/*.test.ts"
+    "test": "node --test --experimental-strip-types lib/*.test.ts lib/momentum/*.test.ts",
+    "yahoo:fetch": "node --experimental-strip-types scripts/yahoo-fetch.ts"
   },
   "engines": {
     "node": ">=20"

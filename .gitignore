@@ -10,3 +10,5 @@ dist/
 *.log
 .DS_Store
 tsconfig.tsbuildinfo
+# local market data (scripts/yahoo-fetch.ts)
+data/

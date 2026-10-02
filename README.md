@@ -64,3 +64,7 @@ npm test                     # filters, strategies, alerts, indicators, momentum
 ```
 
 Schema changes live in `supabase/migrations/`. All migrations are applied to `meal-plan-sync` by hand (Supabase SQL editor or MCP), in order.
+
+### Yahoo Finance history (local)
+
+`npm run yahoo:fetch` downloads daily bars from Yahoo Finance into `data/yahoo/` (gitignored), one CSV per ticker (`date,open,high,low,close,adj_close,volume`) plus `_splits.csv` and `_dividends.csv`. Defaults: today's S&P 500 list plus SPY, MTUM, SPMO, SGOV, QQQ and IWM, from 2010-01-01. Options: `--tickers SPY,AAPL`, `--start 2015-01-01`, `--out <dir>`, `--concurrency 3`, `--full` (re-download everything). Re-runs only fetch new days, and a ticker is fully re-downloaded after a new split or dividend because Yahoo restates its history. Nothing is written to Supabase. Meant as a data source for backtests.
