@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Backtester</title>
+  <link rel="stylesheet" href="app.css" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232a78d6'/%3E%3Cpath d='M6 22l6-6 5 4 9-10' fill='none' stroke='white' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
+</head>
+<body>
+  <header class="top">
+    <div class="brand">Backtester</div>
+    <nav id="tabs">
+      <button data-tab="data">Data</button>
+      <button data-tab="strategies">Strategies</button>
+      <button data-tab="jobs">Jobs <span id="jobBadge" class="badge" hidden></span></button>
+      <button data-tab="results">Results</button>
+    </nav>
+    <div id="dataPill" class="pill muted">…</div>
+  </header>
+  <main>
+    <section id="tab-data" class="tab"></section>
+    <section id="tab-strategies" class="tab"></section>
+    <section id="tab-jobs" class="tab"></section>
+    <section id="tab-results" class="tab"></section>
+  </main>
+  <div id="toast" class="toast" hidden></div>
+  <script src="charts.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -5,7 +5,37 @@ nothing here touches Supabase or Vercel. The momentum strategy reuses the app's 
 in `lib/momentum` (ranking, sizing, sector caps, stops, exits, regime band, volatility brake, wash
 sales, long-term deferral, ticket retries), so results reflect what the live app would have done.
 
-## Setup
+## The app (Windows)
+
+A local app that runs in your browser: set up your data, pick strategies, run backtests and
+sweeps, and browse the results with charts. Everything stays on your computer.
+
+1. Install **Node.js** (LTS, version 22 or newer) from <https://nodejs.org>.
+2. Get the code: `git clone https://github.com/tjones208/Stock_screener.git` (or download the
+   ZIP from GitHub and unzip it).
+3. Open the `Stock_screener\backtest` folder and double-click **Start Backtester.bat**. The first
+   start installs its components (about a minute); then the app opens at <http://localhost:5178>.
+   Keep the black window open while you use it; close it to stop the app. Tip: right-click the
+   .bat file → *Send to* → *Desktop (create shortcut)*.
+4. **Update Backtester.bat** downloads the latest version (needs the git clone); your folders,
+   presets, data and results are kept.
+
+In the app:
+
+- **Data**: paste your folder paths, save your Massive API key (kept in `backtest\.env`), then
+  1) convert the downloads to Parquet, 2) download reference data, 3) prepare. *Try demo data*
+  builds a synthetic market so you can explore before your data is ready.
+- **Strategies**: the library lists the built-in strategies and every file in
+  `backtest\strategies\` (see *Writing a strategy*; click *Reload* after adding one). Tick the
+  ones to run, adjust settings (changed values are highlighted), turn on *Show sweep boxes* to
+  test several values of a setting, and save settings as presets. *Start backtest* runs
+  everything ticked as one batch.
+- **Jobs**: live progress and logs; jobs run one at a time and can be cancelled.
+- **Results**: every batch; a batch compares its runs (equity curves vs SPY / MTUM, sortable
+  stats); a run shows its stats, equity and drawdown charts, settings and trades. *Open folder*
+  shows the files (CSV / JSON) in File Explorer.
+
+## Setup (command line)
 
 Node 22.6+ (runs TypeScript directly).
 
@@ -113,7 +143,9 @@ follow the account's equity (`--set compound=false` keeps them fixed). Sectors c
 
 ## Writing a strategy
 
-Copy `src/strategies/topn.ts`, register it in `src/strategies/index.ts`. A strategy gets each
+Put a `.ts` file in `backtest/strategies/` (copy `strategies/example-low-vol.ts` or
+`src/strategies/topn.ts`); it appears in the app's library and in `bt list` automatically. Add
+`fields` to give its settings labels and groups in the app. A strategy gets each
 day's close (`ctx.today`: every ticker's row with the features above, `ctx.portfolio`,
 `ctx.isMonthEnd`, …) and returns orders for the next open. It never sees future rows.
 

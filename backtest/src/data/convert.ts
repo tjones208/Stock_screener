@@ -18,6 +18,7 @@ export type ConvertOptions = {
   force?: boolean;
   memoryLimit?: string;
   log?: (s: string) => void;
+  onProgress?: (done: number, total: number, label: string) => void;
 };
 
 const AGG_COLUMNS = ["ticker", "volume", "open", "close", "high", "low", "window_start", "transactions"];
@@ -73,7 +74,9 @@ export async function convert(o: ConvertOptions) {
   mkdirSync(tmp, { recursive: true });
   const db = await Duck.open(":memory:", { memory_limit: o.memoryLimit ?? "4GB", temp_directory: tmp, preserve_insertion_order: "false" });
   let written = 0, skipped = 0, rows = 0;
+  let g = 0;
   for (const [k, fs] of groups) {
+    o.onProgress?.(g++, groups.size, k);
     const dir = join(o.dest, `year=${k.slice(0, 4)}`, `month=${k.slice(5, 7)}`);
     const out = join(dir, group === "day" ? `${k}.parquet` : "data.parquet");
     const newest = Math.max(...fs.map((f) => f.mtime));

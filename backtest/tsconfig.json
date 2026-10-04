@@ -11,7 +11,7 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "../lib/momentum/*.ts", "../lib/sectors.ts"],
+  "include": ["src/**/*.ts", "test/**/*.ts", "strategies/**/*.ts", "../lib/momentum/*.ts", "../lib/sectors.ts"],
   "exclude": ["../lib/momentum/*.test.ts", "../lib/momentum/jobs.ts", "../lib/momentum/tickets.ts", "../lib/momentum/positions.ts",
     "../lib/momentum/covered.ts", "../lib/momentum/equity.ts", "../lib/momentum/manual.ts", "../lib/momentum/notify.ts", "../lib/momentum/sector-db.ts"]
 }

@@ -23,9 +23,11 @@ const csv = (rows: Record<string, unknown>[]) => {
   return [cols.join(","), ...rows.map((r) => cols.map((c) => esc(r[c])).join(","))].join("\n") + "\n";
 };
 
-export function writeRun(dir: string, spec: RunSpec, r: { result: RunResult; stats: Stats }, bench: Record<string, Stats>) {
+export function writeRun(dir: string, spec: RunSpec, r: { result: RunResult; stats: Stats }, bench: Record<string, Stats>, label?: string) {
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "summary.json"), JSON.stringify({ strategy: spec.strategy, params: spec.params, options: spec.opt, tax: spec.tax, stats: r.stats, benchmarks: bench,
+  const { onProgress: _p, ...options } = spec.opt;
+  writeFileSync(join(dir, "summary.json"), JSON.stringify({ label: label ?? spec.strategy, strategy: spec.strategy, params: spec.params, options, tax: spec.tax, stats: r.stats, benchmarks: bench,
+    dividends: r.result.dividends, commissions: r.result.commissions, unfilledOrders: r.result.unfilled,
     openPositions: r.result.open.map((l) => ({ ticker: l.ticker, shares: l.shares, entry: l.price, d: l.d })) }, null, 2));
   writeFileSync(join(dir, "equity.csv"), csv(r.result.equity));
   writeFileSync(join(dir, "trades.csv"), csv(r.result.closed));

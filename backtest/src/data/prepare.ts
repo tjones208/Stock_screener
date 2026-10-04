@@ -20,6 +20,7 @@ export type PrepareOptions = {
   to?: string;
   memoryLimit?: string;
   log?: (s: string) => void;
+  onProgress?: (done: number, total: number, label: string) => void;
 };
 
 const FEATURES = String.raw`
@@ -107,7 +108,8 @@ export async function prepare(o: PrepareOptions) {
   const daily = join(o.out, "daily");
   if (existsSync(daily)) rmSync(daily, { recursive: true });
   const years = (await db.all<{ y: number }>(`select distinct year(d)::integer y from cal ${o.from ? `where d >= ${lit(o.from)}::date` : ""} order by y`)).map((r) => r.y);
-  for (const y of years) {
+  for (const [yi, y] of years.entries()) {
+    o.onProgress?.(yi, years.length, `Features ${y}`);
     await db.run(`create or replace table src as select * from adj where d between make_date(${y}, 1, 1) - interval 420 day and make_date(${y}, 12, 31)`);
     const dir = join(daily, `year=${y}`);
     mkdirSync(dir, { recursive: true });

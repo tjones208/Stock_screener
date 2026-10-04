@@ -7,7 +7,7 @@
 // B and E follow the account's equity each day unless `compound` is false.
 import type { Ctx, StrategyDef } from "../engine/engine.ts";
 import type { Order, Row } from "../engine/types.ts";
-import { capitalAndSlots, normalizeMomConfig, type MomConfig } from "../../../lib/momentum/config.ts";
+import { capitalAndSlots, MOM_CHOICES, MOM_DEFAULTS, MOM_FIELDS, normalizeMomConfig, type MomConfig } from "../../../lib/momentum/config.ts";
 import { entryCap, planPortfolio, type Candidate, type Held } from "../../../lib/momentum/sizing.ts";
 import { holdCutoff, holdVerdict, entryOk, rankUniverse, type RuleRow } from "../../../lib/momentum/ranking.ts";
 import { regimeAt } from "../../../lib/momentum/regime.ts";
@@ -17,6 +17,8 @@ import { applyLtDeferral, dueDeferrals, nightlyStop, reviewPosition, topUpShares
 import { momSector } from "../../../lib/momentum/sector-key.ts";
 
 const EXCHANGES = new Set(["XNYS", "XNAS", "XASE"]);
+// Settings with no effect in a backtest: no point-in-time market caps, earnings dates or idle-cash ETF.
+const UNUSED = new Set(["min_market_cap", "earnings_blackout_days", "cash_etf", "tax_rate_st", "tax_rate_lt"]);
 
 type Ticket = TicketState & { ticker: string; T: number; atr: number; sector: string; sigma: number; kind: "buy" | "topup"; plan: string };
 type Ranked = { row: Row; comp_rank: number; mom_pct: number; h52: number; entry: boolean; inUniverse: boolean };
@@ -24,7 +26,14 @@ type Ranked = { row: Row; comp_rank: number; mom_pct: number; h52: number; entry
 export const momentum: StrategyDef = {
   name: "momentum",
   description: "The app's monthly momentum rotation (lib/momentum rules). Params = the app's settings keys, plus compound / regime_ticker.",
-  defaults: { compound: true, regime_ticker: "SPY" },
+  defaults: { ...MOM_DEFAULTS, compound: true, regime_ticker: "SPY" },
+  fields: [
+    { key: "compound", label: "B and E follow account equity (compounding)", group: "Backtest" },
+    { key: "regime_ticker", label: "Regime ticker", group: "Backtest" },
+    // The app's settings, minus the ones a backtest can't use (no market caps, earnings, news, calls).
+    ...MOM_FIELDS.filter((f) => !UNUSED.has(f.key) && !["Covered calls", "Data-quality gate"].includes(f.group))
+      .map((f) => ({ key: f.key, label: f.label, group: f.group, ...(Array.isArray(MOM_CHOICES[f.key]) ? { choices: MOM_CHOICES[f.key] as readonly string[] } : {}) })),
+  ],
   warmupDays: 260,
   create(params, env) {
     const base = normalizeMomConfig(params);

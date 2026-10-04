@@ -27,5 +27,8 @@ export class Duck {
   }
 }
 
-/** Quote a path or string as a SQL literal. */
-export const lit = (s: string) => `'${s.replace(/'/g, "''")}'`;
+/**
+ * Quote a path or string as a SQL literal. Backslashes become forward slashes so Windows paths
+ * (C:\Users\…) work in DuckDB globs; nothing passed through here needs a literal backslash.
+ */
+export const lit = (s: string) => `'${s.replace(/\\/g, "/").replace(/'/g, "''")}'`;

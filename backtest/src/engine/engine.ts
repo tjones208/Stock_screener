@@ -40,10 +40,14 @@ export interface StrategyInstance {
   onUnfilled?(u: Unfilled, ctx: Ctx): void;
 }
 
+/** Form metadata for a parameter (labels, groups, allowed values); optional. */
+export type ParamField = { key: string; label: string; group?: string; choices?: readonly string[]; help?: string };
+
 export interface StrategyDef<P extends Record<string, unknown> = Record<string, unknown>> {
   name: string;
   description: string;
   defaults: P;
+  fields?: ParamField[];
   /** Trading days the strategy watches before it may trade (e.g. to build a regime history). */
   warmupDays: number;
   create(params: P, env: { capital: number }): StrategyInstance;
@@ -59,6 +63,8 @@ export type RunOptions = {
   lotOrder?: LotOrder;     // default lot choice for share-count sells
   delistAfter?: number;    // trading days without a bar before a holding is closed at its last close
   chunkDays?: number;      // trading days loaded per chunk
+  /** Called about every 20 trading days with (days done, total days). */
+  onProgress?: (done: number, total: number) => void;
 };
 
 export type RunResult = {
@@ -99,6 +105,7 @@ export async function runBacktest(data: DataSource, def: StrategyDef, params: Re
   let loaded = new Map<string, Map<string, Row>>();
   let loadedTo = -1;
   for (let i = firstIdx; i <= endIdx; i++) {
+    if (opt.onProgress && (i - firstIdx) % 20 === 0) opt.onProgress(i - firstIdx, endIdx - firstIdx + 1);
     if (i > loadedTo) {
       const to = Math.min(endIdx, i + chunk - 1);
       loaded = await data.rows(all[i], all[to]);

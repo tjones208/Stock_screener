@@ -13,3 +13,5 @@ tsconfig.tsbuildinfo
 # backtest data and results (local only)
 backtest/data/
 backtest/results/
+backtest/app-settings.json
+backtest/presets.json
