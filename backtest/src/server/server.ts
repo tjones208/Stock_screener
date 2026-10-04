@@ -1,7 +1,7 @@
 // The backtest app: a local web server (127.0.0.1 only) and a single-page UI in ./public.
 import { spawn } from "node:child_process";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, extname, join, relative, resolve, sep } from "node:path";
 import { BT_ROOT, loadEnv, saveEnv } from "../env.ts";
 import { loadStrategies } from "../strategies/index.ts";
@@ -86,7 +86,12 @@ function folderInfo(p: string) {
   if (!statSync(p).isDirectory()) return { exists: true, isDir: false };
   const csv = (() => { try { return listFlatFiles(p); } catch { return []; } })();
   let parquet = 0;
-  const walk = (d: string, depth = 0) => { if (depth > 4) return; for (const e of readdirSync(d, { withFileTypes: true })) { if (e.isDirectory() && !e.name.startsWith(".")) walk(join(d, e.name), depth + 1); else if (e.name.endsWith(".parquet")) parquet++; } };
+  const walk = (d: string, depth = 0) => {
+    if (depth > 4) return;
+    let entries: import("node:fs").Dirent[] = [];
+    try { entries = readdirSync(d, { withFileTypes: true }); } catch { return; } // e.g. protected system folders
+    for (const e of entries) { if (e.isDirectory() && !e.name.startsWith(".")) walk(join(d, e.name), depth + 1); else if (e.name.endsWith(".parquet")) parquet++; }
+  };
   walk(p);
   const ref = ["tickers.jsonl", "splits.jsonl", "dividends.jsonl", "details.jsonl"].filter((f) => existsSync(join(p, f)));
   const backtests = readdirSync(p).filter((x) => existsSync(join(p, x, "batch.json"))).length;
@@ -115,8 +120,19 @@ function openInOs(target: string) {
   spawn(cmd, args as string[], { detached: true, stdio: "ignore" }).unref();
 }
 
+/** Errors go to the console and to backtest/backtester.log, and the app keeps running. */
+function logError(where: string, e: unknown) {
+  const text = `${new Date().toISOString()} ${where}: ${e instanceof Error ? e.stack ?? e.message : String(e)}\n`;
+  console.error(text.trim());
+  try { appendFileSync(join(BT_ROOT, "backtester.log"), text); } catch { /* ignore */ }
+}
+
 export async function startServer(o: { port?: number; open?: boolean; host?: string; configDir?: string } = {}) {
   loadEnv();
+  if (!process.listenerCount("uncaughtException")) {
+    process.on("uncaughtException", (e) => logError("uncaught error", e));
+    process.on("unhandledRejection", (e) => logError("unhandled rejection", e));
+  }
   if (o.configDir) {
     SETTINGS = join(o.configDir, "app-settings.json");
     PRESETS = join(o.configDir, "presets.json");
@@ -230,10 +246,12 @@ export async function startServer(o: { port?: number; open?: boolean; host?: str
       if (p.match(/^\/api\/jobs\/\d+\/cancel$/) && req.method === "POST") return send(res, 200, { ok: queue.cancel(Number(p.split("/")[3])) });
       if (p === "/api/events" && req.method === "GET") {
         // Server-sent events: every job change and log line.
+        res.on("error", () => {}); // a closed browser tab must not take the app down
         res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store", connection: "keep-alive" });
         res.write("retry: 2000\n\n");
-        const off = queue.subscribe(({ job, line }) => res.write(`data: ${JSON.stringify({ job: { ...job, log: undefined }, line: line ?? null })}\n\n`));
-        const ping = setInterval(() => res.write(": ping\n\n"), 15000);
+        const write = (s: string) => { if (!res.destroyed && !res.writableEnded) res.write(s); };
+        const off = queue.subscribe(({ job, line }) => write(`data: ${JSON.stringify({ job: { ...job, log: undefined }, line: line ?? null })}\n\n`));
+        const ping = setInterval(() => write(": ping\n\n"), 15000);
         req.on("close", () => { off(); clearInterval(ping); });
         return;
       }
@@ -269,6 +287,8 @@ export async function startServer(o: { port?: number; open?: boolean; host?: str
       }
       return send(res, 404, { error: "Not found" });
     } catch (e) {
+      logError(`${req.method} ${req.url}`, e);
+      if (res.headersSent) { res.end(); return; }
       return send(res, 400, { error: String(e instanceof Error ? e.message : e) });
     }
   });

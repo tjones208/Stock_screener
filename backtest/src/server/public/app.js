@@ -7,11 +7,26 @@ const num = (x, k = 2) => (x == null || !Number.isFinite(x) ? "—" : x.toLocale
 const money = (x) => (x == null || !Number.isFinite(x) ? "—" : `$${Math.round(x).toLocaleString()}`);
 const SERIES = ["--s1", "--s2", "--s3", "--s4", "--s5", "--s6", "--s7", "--s8"];
 
+const OFFLINE = "Can't reach the Backtester. Is the black \"Start Backtester\" window still open? If it closed or shows an error, " +
+  "copy what it says (it's also saved in backtest\\backtester.log), then double-click Start Backtester.bat again and reload this page.";
 async function api(path, opts = {}) {
-  const res = await fetch(path, { ...opts, headers: { "content-type": "application/json" }, body: opts.body ? JSON.stringify(opts.body) : undefined });
+  let res;
+  try {
+    res = await fetch(path, { ...opts, headers: { "content-type": "application/json" }, body: opts.body ? JSON.stringify(opts.body) : undefined });
+  } catch {
+    showOffline(true);
+    throw new Error(OFFLINE);
+  }
+  showOffline(false);
   const j = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(j.error || res.statusText);
   return j;
+}
+function showOffline(on) {
+  let b = document.getElementById("offline");
+  if (!b) { b = document.createElement("div"); b.id = "offline"; b.className = "card err"; b.style.margin = "12px 20px"; document.body.insertBefore(b, document.querySelector("main")); }
+  b.textContent = OFFLINE;
+  b.hidden = !on;
 }
 function toast(msg, ms = 3500) {
   const t = $("#toast"); t.textContent = msg; t.hidden = false;
@@ -48,6 +63,8 @@ function render() {
 // ───────── live jobs ─────────
 function connectEvents() {
   const es = new EventSource("/api/events");
+  es.onerror = () => { if (es.readyState !== EventSource.OPEN) api("/api/state").then(() => showOffline(false)).catch(() => {}); };
+  es.onopen = () => showOffline(false);
   es.onmessage = (m) => {
     const { job, line } = JSON.parse(m.data);
     const prev = S.jobs.get(job.id);

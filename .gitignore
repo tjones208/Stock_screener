@@ -15,3 +15,4 @@ backtest/data/
 backtest/results/
 backtest/app-settings.json
 backtest/presets.json
+backtest/backtester.log

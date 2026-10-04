@@ -67,6 +67,11 @@ export class JobQueue {
     this.emit(job);
     const p = spawn(process.execPath, ["--experimental-strip-types", "--no-warnings", CLI, ...job.args, "--events"], { cwd: BT_ROOT, env: process.env });
     this.proc = p;
+    // A process that can't start (bad path, antivirus block…) fails the job instead of the app.
+    p.on("error", (err) => {
+      job.error = `Couldn't start the job: ${err.message}`;
+      this.line(job, job.error);
+    });
     let buf = "";
     p.stdout!.on("data", (chunk: Buffer) => {
       buf += chunk.toString();
