@@ -6,13 +6,23 @@ import type { MomConfig } from "./config.ts";
 export const holdCutoff = (cfg: Pick<MomConfig, "hold_comprank_mult" | "hold_rank_pct">, N: number, universe: number) =>
   Math.max(cfg.hold_comprank_mult * N, Math.ceil(cfg.hold_rank_pct * universe));
 
-/** percent_rank × 100: share of the other values strictly below x. */
-const pctRank = (xs: (number | null)[], x: number | null) => {
-  if (xs.length < 2) return 0;
-  if (x == null) return 0;
-  // SQL sorts nulls first, so they count as below every real value.
-  return (100 * xs.filter((v) => v == null || v < x).length) / (xs.length - 1);
-};
+/**
+ * percent_rank × 100 for every value at once: share of the other values strictly below x (nulls
+ * sort first, as in SQL, so they count as below every real value). Sorted lookups keep it
+ * O(n log n) for large universes.
+ */
+function pctRanks(xs: (number | null)[]): number[] {
+  const n = xs.length;
+  if (n < 2) return xs.map(() => 0);
+  const nulls = xs.filter((v) => v == null).length;
+  const sorted = (xs.filter((v) => v != null) as number[]).sort((a, b) => a - b);
+  const below = (x: number) => { // count of sorted values < x
+    let lo = 0, hi = sorted.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (sorted[mid] < x) lo = mid + 1; else hi = mid; }
+    return lo;
+  };
+  return xs.map((x) => (x == null ? 0 : (100 * (nulls + below(x))) / (n - 1)));
+}
 
 export type RankInput = { ticker: string; mom: number; h52: number; sigma252: number | null };
 
@@ -21,10 +31,10 @@ export type RankInput = { ticker: string; mom: number; h52: number; sigma252: nu
  * pct(mom / σ252) + 0.25 × H52 pct (no σ252 → bottom of that percentile). Ties go to higher mom.
  */
 export function rankUniverse(rows: RankInput[], method: MomConfig["rank_method"]) {
-  const mom = rows.map((r) => r.mom), h52 = rows.map((r) => r.h52);
   const risk = rows.map((r) => (r.sigma252 && r.sigma252 > 0 ? r.mom / r.sigma252 : null));
+  const momP = pctRanks(rows.map((r) => r.mom)), h52P = pctRanks(rows.map((r) => r.h52)), riskP = pctRanks(risk);
   const scored = rows.map((r, i) => {
-    const mom_pct = pctRank(mom, r.mom), h52_pct = pctRank(h52, r.h52), risk_pct = pctRank(risk, risk[i]);
+    const mom_pct = momP[i], h52_pct = h52P[i], risk_pct = riskP[i];
     const classic = 0.5 * mom_pct + 0.5 * h52_pct, risk_adj = 0.75 * risk_pct + 0.25 * h52_pct;
     return { ...r, mom_pct, h52_pct, classic, risk_adj, composite: method === "classic" ? classic : risk_adj };
   });

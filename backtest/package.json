@@ -1,0 +1,19 @@
+{
+  "name": "stock-screener-backtest",
+  "private": true,
+  "type": "module",
+  "description": "Local backtests on Massive flat files, reusing the app's strategy rules (lib/momentum).",
+  "scripts": {
+    "bt": "node --experimental-strip-types --no-warnings src/cli.ts",
+    "test": "node --test --experimental-strip-types --no-warnings test/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "engines": { "node": ">=22.6" },
+  "dependencies": {
+    "@duckdb/node-api": "1.5.6-r.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.3",
+    "typescript": "^5.9.3"
+  }
+}

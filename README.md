@@ -64,3 +64,7 @@ npm test                     # filters, strategies, alerts, indicators, momentum
 ```
 
 Schema changes live in `supabase/migrations/`. All migrations are applied to `meal-plan-sync` by hand (Supabase SQL editor or MCP), in order.
+
+## Backtests
+
+`backtest/` runs strategies locally on Massive flat files (DuckDB + Parquet), reusing the app's momentum rules. See [backtest/README.md](backtest/README.md).
