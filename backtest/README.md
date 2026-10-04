@@ -38,7 +38,24 @@ npm run bt -- run --data data/synth/data --strategy momentum
    data set is free of survivorship bias. Minute aggregates (`minute_aggs_v1`) use the same
    layout; download them later if a strategy needs intraday data (they're ~50× larger).
 
-2. **Reference data** (splits, dividends, ticker list with delisted names, and SIC codes for
+2. **Convert to Parquet** (optional but recommended: about 3–5× smaller than the CSVs and much
+   faster to read). Works for any Massive flat-file dataset (day or minute aggregates, trades,
+   quotes) and is incremental, so re-run it after each download and only new days are converted:
+
+   ```bash
+   npm run bt -- convert --src ~/massive/day_aggs_v1    --dest ~/massive/parquet/day_aggs
+   npm run bt -- convert --src ~/massive/minute_aggs_v1 --dest ~/massive/parquet/minute_aggs
+   ```
+
+   Columns are kept as delivered (prices unadjusted) plus `d` (trading day) and, for aggregates,
+   `ts` (bar start, UTC). Small daily files are grouped one Parquet per month
+   (`year=YYYY/month=MM/data.parquet`); large ones such as minute bars stay one per day
+   (`year=YYYY/month=MM/YYYY-MM-DD.parquet`). `--group month|day` overrides, `--force` rebuilds.
+   Query them directly with DuckDB, e.g.
+   `select * from read_parquet('~/massive/parquet/minute_aggs/**/*.parquet') where ticker = 'AAPL' and d = '2024-01-03'`.
+   You can delete the CSVs after converting, or keep them as the original copy.
+
+3. **Reference data** (splits, dividends, ticker list with delisted names, and SIC codes for
    sector caps). Put the API key in your environment, never in a file in the repo:
 
    ```bash
@@ -48,10 +65,10 @@ npm run bt -- run --data data/synth/data --strategy momentum
 
    `--details` fetches one record per common stock (resumable if interrupted).
 
-3. **Prepare** (one time, re-run when you add data):
+4. **Prepare** (re-run when you add data). `--flat` takes either the CSV folder or its Parquet copy:
 
    ```bash
-   npm run bt -- prepare --flat ~/massive/day_aggs_v1 --ref ~/massive/ref --data ~/massive/bt --memory 8GB
+   npm run bt -- prepare --flat ~/massive/parquet/day_aggs --ref ~/massive/ref --data ~/massive/bt --memory 8GB
    ```
 
    Writes split-adjusted bars plus features to `~/massive/bt/daily/year=YYYY/data.parquet`, and

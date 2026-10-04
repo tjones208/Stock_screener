@@ -8,9 +8,10 @@
 import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { Duck, lit } from "./duck.ts";
+import { isParquetDir } from "./convert.ts";
 
 export type PrepareOptions = {
-  /** Folder with Massive day aggregates (…/day_aggs_v1), any depth of YYYY/MM/YYYY-MM-DD.csv.gz. */
+  /** Massive day aggregates: the downloaded …/day_aggs_v1 folder (*.csv.gz) or its `bt convert` Parquet copy. */
   flat: string;
   /** Folder with reference files from `bt fetch-ref` (tickers.jsonl, splits.jsonl, dividends.jsonl, details.jsonl). */
   ref?: string;
@@ -65,12 +66,15 @@ export async function prepare(o: PrepareOptions) {
 
   log("Reading day aggregates…");
   const where = [o.from ? `d >= ${lit(o.from)}::date - interval 420 day` : null, o.to ? `d <= ${lit(o.to)}::date` : null].filter(Boolean).join(" and ");
-  await db.run(`create table raw as
-    select ticker, d, open::double o, high::double h, low::double l, close::double c, volume::double v from (
-      select *, regexp_extract(filename, '(\\d{4}-\\d{2}-\\d{2})', 1)::date d
+  // Converted Parquet (bt convert) or the raw *.csv.gz files.
+  const source = isParquetDir(o.flat)
+    ? `select ticker, d, open, high, low, close, volume from read_parquet(${lit(join(o.flat, "**", "*.parquet"))}, union_by_name = true)`
+    : `select *, regexp_extract(filename, '(\\d{4}-\\d{2}-\\d{2})', 1)::date d
       from read_csv(${lit(join(o.flat, "**", "*.csv.gz"))}, header = true, filename = true, union_by_name = true,
-        types = {'ticker': 'VARCHAR', 'volume': 'DOUBLE', 'open': 'DOUBLE', 'close': 'DOUBLE', 'high': 'DOUBLE', 'low': 'DOUBLE'})
-    ) where close > 0 ${where ? `and ${where}` : ""}`);
+        types = {'ticker': 'VARCHAR', 'volume': 'DOUBLE', 'open': 'DOUBLE', 'close': 'DOUBLE', 'high': 'DOUBLE', 'low': 'DOUBLE'})`;
+  await db.run(`create table raw as
+    select ticker, d, open::double o, high::double h, low::double l, close::double c, volume::double v from (${source})
+    where close > 0 ${where ? `and ${where}` : ""}`);
   const [{ n, d0, d1 }] = await db.all<{ n: number; d0: string; d1: string }>(`select count(*)::double n, min(d)::varchar d0, max(d)::varchar d1 from raw`);
   log(`  ${n.toLocaleString()} bars, ${d0} → ${d1}`);
 

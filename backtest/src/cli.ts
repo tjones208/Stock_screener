@@ -3,6 +3,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { prepare } from "./data/prepare.ts";
+import { convert } from "./data/convert.ts";
 import { fetchReference } from "./data/fetch-ref.ts";
 import { synth } from "./data/synth.ts";
 import { ParquetSource } from "./data/store.ts";
@@ -14,7 +15,9 @@ const HELP = `bt — backtests on Massive flat files with the app's strategy rul
 
   bt synth      --out <dir> [--years 4] [--stocks 60]        synthetic flat files + reference (demo / tests)
   bt fetch-ref  --out <ref dir> [--details] [--rps 10]       reference data from Massive (needs MASSIVE_API_KEY)
-  bt prepare    --flat <day_aggs dir> --ref <ref dir> --data <out dir> [--from YYYY-MM-DD] [--memory 8GB]
+  bt convert    --src <flat-file dir> --dest <parquet dir> [--group auto|month|day] [--force]
+                                                             any Massive flat files (*.csv.gz) → Parquet; incremental
+  bt prepare    --flat <day_aggs dir or its parquet copy> --ref <ref dir> --data <out dir> [--from YYYY-MM-DD] [--memory 8GB]
   bt list                                                    strategies and their parameters
   bt run        --data <dir> --strategy momentum [--from] [--to] [--capital 20000] [--set key=value ...]
                 [--slippage-bps 10] [--commission 0] [--bench SPY,MTUM] [--tax 0.30,0.15] [--where "c >= 1"] [--out results]
@@ -40,7 +43,7 @@ async function main() {
       set: { type: "string", multiple: true }, grid: { type: "string", multiple: true },
       "slippage-bps": { type: "string", default: "10" }, commission: { type: "string", default: "0" },
       bench: { type: "string", default: "SPY,MTUM" }, tax: { type: "string", default: "0.30,0.15" },
-      where: { type: "string" }, sort: { type: "string", default: "sharpe" }, name: { type: "string" },
+      where: { type: "string" }, src: { type: "string" }, dest: { type: "string" }, group: { type: "string" }, force: { type: "boolean" }, sort: { type: "string", default: "sharpe" }, name: { type: "string" },
     },
   });
   switch (cmd) {
@@ -51,6 +54,10 @@ async function main() {
     }
     case "fetch-ref":
       return fetchReference({ out: resolve(a.out ?? "data/ref"), details: a.details, rps: a.rps ? Number(a.rps) : undefined });
+    case "convert":
+      if (!a.src || !a.dest) throw new Error("convert needs --src and --dest");
+      await convert({ src: resolve(a.src), dest: resolve(a.dest), group: (a.group as "auto" | "month" | "day") ?? "auto", force: a.force, memoryLimit: a.memory });
+      return;
     case "prepare":
       if (!a.flat || !a.data) throw new Error("prepare needs --flat and --data");
       await prepare({ flat: resolve(a.flat), ref: a.ref ? resolve(a.ref) : undefined, out: resolve(a.data), from: a.from, to: a.to, memoryLimit: a.memory });
