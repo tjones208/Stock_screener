@@ -57,6 +57,50 @@ const FEATURES = String.raw`
   from x
   window w as (partition by ticker order by d)`;
 
+// Column names other tools use for the same fields (first match wins).
+const ALIASES: Record<string, string[]> = {
+  ticker: ["ticker", "symbol", "sym", "ticker_symbol", "code"],
+  d: ["d", "date", "day", "trade_date", "trading_date", "session_date", "dt", "timestamp", "ts", "time", "datetime", "window_start", "t"],
+  open: ["open", "o", "open_price"],
+  high: ["high", "h", "high_price"],
+  low: ["low", "l", "low_price"],
+  close: ["close", "c", "close_price"],
+  volume: ["volume", "v", "vol"],
+};
+
+/**
+ * SELECT for daily bars from any Parquet folder: maps common column names onto ticker, d (DATE),
+ * open, high, low, close, volume. Dates may be DATE, TIMESTAMP, text, or epoch numbers (s, ms, µs
+ * or ns); rows without a positive close (e.g. reference files in the same folder) drop out later.
+ */
+export async function parquetBars(db: Duck, dir: string, log: (s: string) => void = () => {}) {
+  const src = `read_parquet(${lit(join(dir, "**", "*.parquet"))}, union_by_name = true, hive_partitioning = false)`;
+  const cols = await db.all<{ column_name: string; column_type: string }>(`select column_name, column_type from (describe select * from ${src})`);
+  const byLower = new Map(cols.map((c) => [c.column_name.toLowerCase(), c]));
+  // Every column matching a field, in alias order: a folder can mix files (e.g. bars with "symbol"
+  // next to a reference file with "ticker"), so the matches are coalesced row by row.
+  type Col = { column_name: string; column_type: string };
+  const pick: Record<string, Col[]> = {};
+  for (const [want, names] of Object.entries(ALIASES)) pick[want] = names.map((n) => byLower.get(n)).filter((c): c is Col => !!c);
+  const missing = Object.keys(ALIASES).filter((k) => !pick[k].length && k !== "volume");
+  if (missing.length) {
+    throw new Error(`The Parquet files in ${dir} have no column for: ${missing.join(", ")}. Columns found: ${cols.map((c) => `${c.column_name} (${c.column_type})`).join(", ")}. ` +
+      "Use the app's Convert step on the downloaded Massive CSV files, or tell us which column holds each field.");
+  }
+  const q = (c: Col) => `"${c.column_name.replace(/"/g, '""')}"`;
+  const dateOf = (c: Col) => /INT|DECIMAL|DOUBLE|FLOAT|NUMERIC/.test(c.column_type.toUpperCase())
+    ? `(case when abs(${q(c)}) > 1e17 then to_timestamp(${q(c)} / 1e9) when abs(${q(c)}) > 1e14 then to_timestamp(${q(c)} / 1e6)
+         when abs(${q(c)}) > 1e11 then to_timestamp(${q(c)} / 1e3) else to_timestamp(${q(c)}) end)::date`
+    : `try_cast(${q(c)} as date)`;
+  const any = (cs: Col[], f: (c: Col) => string) => (cs.length === 1 ? f(cs[0]) : `coalesce(${cs.map(f).join(", ")})`);
+  const num = (c: Col) => `try_cast(${q(c)} as double)`;
+  const names = (cs: Col[]) => cs.map((c) => c.column_name).join("/");
+  log(`  Parquet columns: ticker=${names(pick.ticker)}, date=${pick.d.map((c) => `${c.column_name} (${c.column_type})`).join("/")}, open=${names(pick.open)}, ` +
+    `high=${names(pick.high)}, low=${names(pick.low)}, close=${names(pick.close)}, volume=${pick.volume.length ? names(pick.volume) : "(none: 0)"}`);
+  return `select ${any(pick.ticker, (c) => `${q(c)}::varchar`)} as ticker, ${any(pick.d, dateOf)} as d, ${any(pick.open, num)} as "open", ${any(pick.high, num)} as "high",
+    ${any(pick.low, num)} as "low", ${any(pick.close, num)} as "close", ${pick.volume.length ? any(pick.volume, num) : "0"} as "volume" from ${src}`;
+}
+
 export async function prepare(o: PrepareOptions) {
   const log = o.log ?? console.log;
   mkdirSync(o.out, { recursive: true });
@@ -67,31 +111,47 @@ export async function prepare(o: PrepareOptions) {
 
   log("Reading day aggregates…");
   const where = [o.from ? `d >= ${lit(o.from)}::date - interval 420 day` : null, o.to ? `d <= ${lit(o.to)}::date` : null].filter(Boolean).join(" and ");
-  // Converted Parquet (bt convert) or the raw *.csv.gz files.
+  // Parquet (from bt convert or another tool: column names are detected) or the raw *.csv.gz files.
   const source = isParquetDir(o.flat)
-    ? `select ticker, d, open, high, low, close, volume from read_parquet(${lit(join(o.flat, "**", "*.parquet"))}, union_by_name = true)`
+    ? await parquetBars(db, o.flat, log)
     : `select *, regexp_extract(filename, '(\\d{4}-\\d{2}-\\d{2})', 1)::date d
       from read_csv(${lit(join(o.flat, "**", "*.csv.gz"))}, header = true, filename = true, union_by_name = true,
         types = {'ticker': 'VARCHAR', 'volume': 'DOUBLE', 'open': 'DOUBLE', 'close': 'DOUBLE', 'high': 'DOUBLE', 'low': 'DOUBLE'})`;
   await db.run(`create table raw as
     select ticker, d, open::double o, high::double h, low::double l, close::double c, volume::double v from (${source})
-    where close > 0 ${where ? `and ${where}` : ""}`);
+    where close > 0 and d is not null ${where ? `and ${where}` : ""}
+    qualify row_number() over (partition by ticker, d) = 1`);
   const [{ n, d0, d1 }] = await db.all<{ n: number; d0: string; d1: string }>(`select count(*)::double n, min(d)::varchar d0, max(d)::varchar d1 from raw`);
   log(`  ${n.toLocaleString()} bars, ${d0} → ${d1}`);
+  if (!n) {
+    db.close();
+    throw new Error(`No daily bars were read from ${o.flat}: no rows had a ticker, a date and a positive close` +
+      `${o.from || o.to ? " in the chosen period" : ""}. Check that this is the daily-bars folder (not reference data or minute bars).`);
+  }
 
   // Splits → cumulative factor for every date before each split.
   const splits = ref("splits.jsonl");
   if (splits) {
-    await db.run(`create table split_cum as
-      with s as (
-        select ticker, execution_date::date ed, max(split_from::double) sf, max(split_to::double) st
-        from read_json(${lit(splits)}, format = 'newline_delimited') where split_from > 0 and split_to > 0 group by 1, 2
-      )
-      select ticker, ed, exp(sum(ln(sf / st)) over (partition by ticker order by ed desc rows between unbounded preceding and current row)) f from s`);
+    await db.run(`create table split_ev as
+      select ticker, execution_date::date ed, max(split_from::double) sf, max(split_to::double) st
+      from read_json(${lit(splits)}, format = 'newline_delimited') where split_from > 0 and split_to > 0 group by 1, 2`);
   } else {
-    log("  No splits.jsonl: prices are NOT split-adjusted (run `bt fetch-ref` first).");
-    await db.run(`create table split_cum (ticker varchar, ed date, f double)`);
+    log("  No splits.jsonl: prices are NOT split-adjusted (download reference data first).");
+    await db.run(`create table split_ev (ticker varchar, ed date, sf double, st double)`);
   }
+  await db.run(`create table split_all as
+    select ticker, ed, exp(sum(ln(sf / st)) over (partition by ticker order by ed desc rows between unbounded preceding and current row)) f from split_ev`);
+  // Are the source prices already split-adjusted (common in data from other tools)? Look at real
+  // splits (ratio ≥ 1.5×): unadjusted prices jump by the split ratio on the split day.
+  const [chk] = await db.all<{ n: number; raw: number }>(`
+    with s as (select ticker, ed, sf / st r from split_ev where sf / st not between 0.67 and 1.5),
+    a as (select s.*, b.c c_after from s asof join raw b on s.ticker = b.ticker and s.ed <= b.d),
+    x as (select a.*, b.c c_before from a asof join raw b on a.ticker = b.ticker and a.ed > b.d)
+    select count(*)::integer n, count(*) filter (where abs(ln(c_after / c_before) - ln(r)) < abs(ln(c_after / c_before)))::integer raw
+    from x where c_before > 0 and c_after > 0`);
+  const alreadyAdjusted = chk.n >= 5 && chk.raw < 0.3 * chk.n;
+  if (chk.n) log(`  Split check: ${chk.raw} of ${chk.n} splits show the raw price jump → prices are ${alreadyAdjusted ? "ALREADY split-adjusted (left as they are)" : "unadjusted (adjusting them)"}.`);
+  await db.run(alreadyAdjusted ? `create table split_cum (ticker varchar, ed date, f double)` : `create table split_cum as select * from split_all`);
   await db.run(`create table adj as
     select r.ticker, r.d, r.o * coalesce(s.f, 1) o, r.h * coalesce(s.f, 1) h, r.l * coalesce(s.f, 1) l, r.c * coalesce(s.f, 1) c,
            r.v / coalesce(s.f, 1) v, r.c * r.v dv, min(r.d) over (partition by r.ticker) first_d
@@ -142,7 +202,7 @@ export async function prepare(o: PrepareOptions) {
       ${divs ? `select dv.ticker, dv.ex_dividend_date::varchar ex_date, dv.cash_amount::double * coalesce(s.f, 1) cash
       from (select distinct on (ticker, ex_dividend_date) ticker, ex_dividend_date::date ex_dividend_date, cash_amount
             from read_json(${lit(divs)}, format = 'newline_delimited', union_by_name = true) where cash_amount > 0) dv
-      asof left join split_cum s on dv.ticker = s.ticker and dv.ex_dividend_date < s.ed`
+      asof left join split_all s on dv.ticker = s.ticker and dv.ex_dividend_date < s.ed`
       : `select null::varchar ticker, null::varchar ex_date, null::double cash where false`}
     ) to ${lit(join(o.out, "dividends.parquet"))} (format parquet)`);
 

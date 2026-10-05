@@ -11,7 +11,7 @@ function rng(seed: number) {
   return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 2 ** 32);
 }
 
-export type SynthOptions = { out: string; from?: string; years?: number; stocks?: number; seed?: number };
+export type SynthOptions = { out: string; from?: string; years?: number; stocks?: number; seed?: number; splits?: number };
 
 export function synth(o: SynthOptions) {
   const rand = rng(o.seed ?? 7);
@@ -35,7 +35,7 @@ export function synth(o: SynthOptions) {
       drift: -0.1 + rand() * 0.5, vol: 0.2 + rand() * 0.4, sic: sics[k % sics.length],
       // One delisting two-thirds of the way through, one 2-for-1 split in the middle.
       endIdx: k === 1 ? Math.floor(days.length * 0.66) : days.length,
-      split: k === 2 ? days[Math.floor(days.length / 2)] : undefined,
+      split: k >= 2 && k < 2 + (o.splits ?? 1) ? days[Math.floor(days.length / 2) + (k - 2) * 5] : undefined,
     });
   }
   const files = new Map<string, string[]>();
