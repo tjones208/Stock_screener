@@ -61,3 +61,14 @@ test("app server: settings, presets, batch job, results", async (t) => {
   const info = (await call("/api/folder", { method: "POST", body: { path: join(dir, "flat") } })).json;
   assert.ok(info.csvFiles > 400);
 });
+
+test("pasted folder paths: quotes, spaces and trailing slashes are removed", async () => {
+  const { cleanPath } = await import("../src/server/server.ts");
+  assert.equal(cleanPath('"D:\\Backtest Reference"'), "D:\\Backtest Reference");
+  assert.equal(cleanPath("  'D:\\data\\'  "), "D:\\data");
+  assert.equal(cleanPath("/home/x/data/"), "/home/x/data");
+  assert.equal(cleanPath("D:\\"), "D:\\");
+  assert.equal(cleanPath('"D:\\"'), "D:\\");
+  assert.equal(cleanPath("/"), "/");
+  assert.equal(cleanPath(undefined), "");
+});

@@ -153,7 +153,8 @@ function renderData() {
   root.querySelectorAll("[data-folder]").forEach((i) => i.addEventListener("input", () => { clearTimeout(i._t); i._t = setTimeout(() => checkFolder(i.dataset.folder, i.value), 400); }));
   root.querySelectorAll("[data-openfolder]").forEach((b) => b.addEventListener("click", () => api("/api/open", { method: "POST", body: { path: $(`[data-folder=${b.dataset.openfolder}]`).value } })));
   $("#saveFolders").onclick = async () => {
-    const folders = Object.fromEntries([...root.querySelectorAll("[data-folder]")].map((i) => [i.dataset.folder, i.value.trim()]));
+    // Pasted paths often come with quotes ("Copy as path"); strip them.
+    const folders = Object.fromEntries([...root.querySelectorAll("[data-folder]")].map((i) => [i.dataset.folder, i.value.trim().replace(/^["']+|["']+$/g, "").trim()]));
     await api("/api/settings", { method: "POST", body: { folders } }); toast("Folders saved"); refresh();
   };
   $("#saveKey").onclick = async () => {

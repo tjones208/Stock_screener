@@ -27,10 +27,18 @@ const defaults = (): Settings => ({
   prepare: { from: "", memory: "8GB" },
 });
 const readJson = <T>(f: string, fallback: T): T => { try { return existsSync(f) ? (JSON.parse(readFileSync(f, "utf8")) as T) : fallback; } catch { return fallback; } };
+/**
+ * A pasted folder path, cleaned: surrounding spaces and quotes removed (Windows' "Copy as path"
+ * adds quotes), trailing slashes dropped.
+ */
+export const cleanPath = (p: unknown) => String(p ?? "").trim().replace(/^["']+|["']+$/g, "").trim().replace(/(?<=[^:\\/])[\\/]+$/, ""); // keeps a drive root ("D:\\") and "/"
+const cleanFolders = (f: Partial<Settings["folders"]> = {}) =>
+  Object.fromEntries(Object.entries(f).map(([k, v]) => [k, cleanPath(v)])) as Partial<Settings["folders"]>;
+
 const loadSettings = (): Settings => {
   const s = readJson<Partial<Settings>>(SETTINGS, {});
   const d = defaults();
-  return { folders: { ...d.folders, ...s.folders }, run: { ...d.run, ...s.run }, prepare: { ...d.prepare, ...s.prepare } };
+  return { folders: { ...d.folders, ...cleanFolders(s.folders) }, run: { ...d.run, ...s.run }, prepare: { ...d.prepare, ...s.prepare } };
 };
 
 function send(res: ServerResponse, code: number, body: unknown, type = "application/json") {
@@ -168,7 +176,7 @@ export async function startServer(o: { port?: number; open?: boolean; host?: str
       }
       if (p === "/api/settings" && req.method === "POST") {
         const b = (await body(req)) as Partial<Settings>;
-        const next: Settings = { folders: { ...settings.folders, ...b.folders }, run: { ...settings.run, ...b.run }, prepare: { ...settings.prepare, ...b.prepare } };
+        const next: Settings = { folders: { ...settings.folders, ...cleanFolders(b.folders) }, run: { ...settings.run, ...b.run }, prepare: { ...settings.prepare, ...b.prepare } };
         writeFileSync(SETTINGS, JSON.stringify(next, null, 2));
         return send(res, 200, next);
       }
@@ -178,9 +186,9 @@ export async function startServer(o: { port?: number; open?: boolean; host?: str
         saveEnv("MASSIVE_API_KEY", k);
         return send(res, 200, { keySet: true });
       }
-      if (p === "/api/folder" && req.method === "POST") return send(res, 200, folderInfo(String((await body(req)).path ?? "")));
+      if (p === "/api/folder" && req.method === "POST") return send(res, 200, folderInfo(cleanPath((await body(req)).path)));
       if (p === "/api/open" && req.method === "POST") {
-        const t = String((await body(req)).path ?? "");
+        const t = cleanPath((await body(req)).path);
         if (t && existsSync(t)) openInOs(t);
         return send(res, 200, { ok: true });
       }
