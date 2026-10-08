@@ -145,11 +145,12 @@ follow the account's equity (`--set compound=false` keeps them fixed). Sectors c
 
 A swing strategy: liquid stock in an uptrend (close > 50-day > 200-day average), relative strength
 in the top 25%, a pullback in the last 5 days (touched the 20-day average or 2+ down closes), then a
-close above the prior day's high, while SPY is above its 200-day average. Buys at the next open
-sized to risk 0.75% of equity, with a swing-low stop, a 2R target, an exit after a close under the
-20-day average and a 15-day time stop. Every setting is in the app (same names as the Python
-`Params`); set capital and slippage on the run. Matches the original Python trade for trade
-with `rs_universe = all`; the default `liquid` ranks relative strength among tradable stocks only.
+close above the prior day's high, while SPY is above its 50-day average (`market_ma`). Buys at the
+next open sized to risk 0.75% of equity, with a swing-low stop, a 2R target, an exit after a close
+under the 20-day average and a 15-day time stop. Every setting is in the app (same names as the
+Python `Params`, plus `market_ma`); set capital and slippage on the run. Matches the original
+Python trade for trade with `rs_universe = all` and `market_ma = 200` (the Python filtered on the
+200-day); the default `liquid` ranks relative strength among tradable stocks only.
 
 ## Writing a strategy
 

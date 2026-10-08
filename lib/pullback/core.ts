@@ -10,7 +10,7 @@ export type PbParams = {
   pullback_window: number; ma_touch_tolerance: number; min_down_days: number;
   swing_low_lookback: number; atr_period: number; stop_buffer_atr: number; min_stop_pct: number; max_stop_pct: number;
   reward_risk: number; exit_on_close_below_fast_ma: boolean; max_hold_days: number;
-  use_market_filter: boolean; market_ticker: string;
+  use_market_filter: boolean; market_ticker: string; market_ma: number;
 };
 
 export const PB_DEFAULTS: PbParams = {
@@ -21,7 +21,7 @@ export const PB_DEFAULTS: PbParams = {
   pullback_window: 5, ma_touch_tolerance: 0.02, min_down_days: 2,
   swing_low_lookback: 10, atr_period: 14, stop_buffer_atr: 0.25, min_stop_pct: 0.02, max_stop_pct: 0.1,
   reward_risk: 2, exit_on_close_below_fast_ma: true, max_hold_days: 15,
-  use_market_filter: true, market_ticker: "SPY",
+  use_market_filter: true, market_ticker: "SPY", market_ma: 50,
 };
 
 export type PbField = { key: keyof PbParams; label: string; group: string; choices?: readonly string[]; help?: string };
@@ -52,8 +52,9 @@ export const PB_FIELDS: PbField[] = [
   { key: "reward_risk", label: "Target (R multiple)", group: "Stops & exits" },
   { key: "exit_on_close_below_fast_ma", label: "Exit on a close below the fast MA", group: "Stops & exits" },
   { key: "max_hold_days", label: "Time stop (trading days)", group: "Stops & exits" },
-  { key: "use_market_filter", label: "Only buy when the market is above its slow MA", group: "Market regime" },
+  { key: "use_market_filter", label: "Only buy when the market is above its average", group: "Market regime" },
   { key: "market_ticker", label: "Market ticker", group: "Market regime" },
+  { key: "market_ma", label: "Market average (days)", group: "Market regime", help: "Buy only while the market ticker closes above this moving average (the original Python used 200)." },
 ];
 
 /** Settings JSON → parameters (unknown keys dropped, bad values fall back to the defaults). */
@@ -67,7 +68,7 @@ export function normalizePb(input: Record<string, unknown> | null | undefined): 
     else out[k] = String(v);
   }
   const p = out as PbParams;
-  for (const k of ["max_positions", "dollar_vol_lookback", "fast_ma", "mid_ma", "slow_ma", "rs_lookback", "pullback_window", "min_down_days", "swing_low_lookback", "atr_period", "max_hold_days"] as const) {
+  for (const k of ["max_positions", "dollar_vol_lookback", "fast_ma", "mid_ma", "slow_ma", "market_ma", "rs_lookback", "pullback_window", "min_down_days", "swing_low_lookback", "atr_period", "max_hold_days"] as const) {
     p[k] = Math.max(1, Math.round(p[k]));
   }
   return p;
@@ -75,7 +76,7 @@ export function normalizePb(input: Record<string, unknown> | null | undefined): 
 
 /** Bars of history a ticker needs for every rule. */
 export const pbHistoryBars = (p: PbParams) =>
-  Math.max(p.slow_ma, p.mid_ma, p.fast_ma, p.rs_lookback + 1, p.atr_period, p.dollar_vol_lookback, p.swing_low_lookback, p.pullback_window + 1) + 1;
+  Math.max(p.slow_ma, p.mid_ma, p.market_ma, p.fast_ma, p.rs_lookback + 1, p.atr_period, p.dollar_vol_lookback, p.swing_low_lookback, p.pullback_window + 1) + 1;
 
 export type PbBar = { c: number; h: number; l: number; dv: number };
 
@@ -85,8 +86,8 @@ export class Hist {
   private head = -1;
   private c: Float64Array; private h: Float64Array; private l: Float64Array; private tr: Float64Array; private dv: Float64Array;
   private touched: Uint8Array; private streak: Uint16Array;
-  private sums = { fast: 0, mid: 0, slow: 0, tr: 0, dv: 0 };
-  maFast = NaN; maMid = NaN; maSlow = NaN; atr = NaN; avgDv = NaN;
+  private sums = { fast: 0, mid: 0, slow: 0, market: 0, tr: 0, dv: 0 };
+  maFast = NaN; maMid = NaN; maSlow = NaN; maMarket = NaN; atr = NaN; avgDv = NaN;
   private p: PbParams;
   private N: number;
   constructor(p: PbParams, N: number) {
@@ -115,6 +116,7 @@ export class Hist {
     this.maFast = roll("fast", this.c, p.fast_ma);
     this.maMid = roll("mid", this.c, p.mid_ma);
     this.maSlow = roll("slow", this.c, p.slow_ma);
+    this.maMarket = roll("market", this.c, p.market_ma); // the regime filter, read on the market ticker
     this.atr = roll("tr", this.tr, p.atr_period);
     this.avgDv = roll("dv", this.dv, p.dollar_vol_lookback);
     this.touched[i] = r.l <= this.maFast * (1 + p.ma_touch_tolerance) ? 1 : 0; // NaN MA → false

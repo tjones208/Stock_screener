@@ -85,11 +85,14 @@ test("pullback: position caps, exit reasons, no doubling up", async () => {
   assert.ok(r.closed.every((c) => c.days <= p.max_hold_days * 1.6 + 3));
 });
 
-test("pullback: the market filter blocks entries while SPY is under its 200-day average", async () => {
+test("pullback: the market filter blocks entries while SPY is under its market_ma average", async () => {
   const { src, days } = universe(7);
-  const on = await runBacktest(src, pullback as unknown as StrategyDef, { min_price: 1 }, { from: days[0], to: days.at(-1)!, capital: 125_000 });
-  const off = await runBacktest(src, pullback as unknown as StrategyDef, { min_price: 1, use_market_filter: false }, { from: days[0], to: days.at(-1)!, capital: 125_000 });
-  assert.ok(off.fills.length >= on.fills.length);
-  // No entry can come before SPY has 200 bars of history.
-  assert.ok(on.fills.filter((f) => f.side === "buy").every((f) => f.d > days[200]));
+  const run = (params: Record<string, unknown>) =>
+    runBacktest(src, pullback as unknown as StrategyDef, { min_price: 1, ...params }, { from: days[0], to: days.at(-1)!, capital: 125_000 });
+  const [on50, on200, off] = await Promise.all([run({}), run({ market_ma: 200 }), run({ use_market_filter: false })]);
+  const buys = (r: Awaited<ReturnType<typeof run>>) => r.fills.filter((f) => f.side === "buy");
+  assert.ok(buys(off).length >= buys(on50).length && buys(off).length >= buys(on200).length);
+  // Stocks need their own 200-day average either way, so nothing is bought before day 200.
+  assert.ok([...buys(on50), ...buys(on200)].every((f) => f.d > days[200]));
+  assert.notDeepEqual(buys(on50).map((f) => f.d + f.ticker), buys(on200).map((f) => f.d + f.ticker));
 });

@@ -81,7 +81,7 @@ export async function runScan() {
   if (!mkt?.d.length) throw new Error(`No bars for the market ticker ${p.market_ticker}.`);
   const d = mkt.d.at(-1)!;
   const mh = histOf(mkt, p);
-  const regime = { ticker: p.market_ticker, close: mkt.c.at(-1)!, ma: Number.isFinite(mh.maSlow) ? mh.maSlow : null, ok: mkt.c.at(-1)! > mh.maSlow };
+  const regime = { ticker: p.market_ticker, close: mkt.c.at(-1)!, ma: Number.isFinite(mh.maMarket) ? mh.maMarket : null, days: p.market_ma, ok: mkt.c.at(-1)! > mh.maMarket };
   const riskOn = !p.use_market_filter || regime.ok;
 
   const signals: { u: Universe; rs: number; stop: number }[] = [];
@@ -131,7 +131,7 @@ export async function runScan() {
     { step: "Pullback, then a close above the prior high", count: signals.length },
   ];
   const trade_d = addTradingDays(cal, d, 1);
-  const scan = { signal_d: d, trade_d, equity, regime: { ...regime, filter: p.use_market_filter }, funnel, buys: riskOn ? buys : [], exits, warnings: riskOn ? warnings : [...warnings, `${p.market_ticker} is under its ${p.slow_ma}-day average: no new buys.`], created_at: new Date().toISOString() };
+  const scan = { signal_d: d, trade_d, equity, regime: { ...regime, filter: p.use_market_filter }, funnel, buys: riskOn ? buys : [], exits, warnings: riskOn ? warnings : [...warnings, `${p.market_ticker} is under its ${p.market_ma}-day average: no new buys.`], created_at: new Date().toISOString() };
   const { error } = await db().from("ss_pb_scans").upsert(scan, { onConflict: "signal_d" });
   if (error) throw new Error(`ss_pb_scans: ${error.message}`);
   return { ...scan, riskOn, stale, blockedBuys: riskOn ? 0 : buys.length };

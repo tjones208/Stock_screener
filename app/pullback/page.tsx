@@ -11,7 +11,7 @@ export const maxDuration = 120;
 
 type Scan = {
   signal_d: string; trade_d: string | null; equity: number | null; created_at: string;
-  regime: { ticker: string; close: number; ma: number | null; ok: boolean; filter: boolean } | null;
+  regime: { ticker: string; close: number; ma: number | null; days?: number; ok: boolean; filter: boolean } | null;
   funnel: { step: string; count: number }[] | null; buys: BuyRow[]; warnings: string[];
 };
 
@@ -168,7 +168,7 @@ export default async function Pullback() {
 
         {scan?.regime && (
           <p>
-            Market: {scan.regime.ticker} {num(scan.regime.close)} vs {p.slow_ma}-day average {num(scan.regime.ma)}:{" "}
+            Market: {scan.regime.ticker} {num(scan.regime.close)} vs {scan.regime.days ?? 200}-day average {num(scan.regime.ma)}:{" "}
             {scan.regime.ok ? <span className="tag tag-buy">ABOVE</span> : <span className="tag tag-sell">BELOW</span>}
             {!scan.regime.filter && <span className="muted"> (filter off)</span>}
           </p>

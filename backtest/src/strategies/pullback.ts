@@ -21,7 +21,7 @@ export const pullback: StrategyDef<PbParams> = {
   defaults: PB_DEFAULTS,
   fields: PB_FIELDS,
   // Enough bars for the longest lookback, plus a margin for tickers with gaps.
-  warmupDays: (p) => Math.ceil(Math.max(p.slow_ma, p.rs_lookback + 1, p.mid_ma) * 1.1) + 10,
+  warmupDays: (p) => Math.ceil(Math.max(p.slow_ma, p.rs_lookback + 1, p.mid_ma, p.market_ma) * 1.1) + 10,
   create(p) {
     const N = pbHistoryBars(p);
     const hist = new Map<string, Hist>();
@@ -60,7 +60,7 @@ export const pullback: StrategyDef<PbParams> = {
           if (m) marketSeen = true;
           if (marketSeen) {
             const mr = ctx.row(p.market_ticker);
-            if (!mr || !m || !(mr.c > m.maSlow)) return orders;
+            if (!mr || !m || !(mr.c > m.maMarket)) return orders;
           }
         }
 
