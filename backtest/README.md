@@ -165,6 +165,15 @@ dividends or costs; a stock that stops trading counts at its last close. Output 
 npm run bt -- study --data ~/massive/bt --strategy pullback --from 2005-01-01 --to 2018-12-31 [--set market_ma=200]
 ```
 
+Signal definitions for studies (`src/strategies/signals.ts`), all with pullback's liquidity filter and
+SPY above its 200-day average; as backtests they buy every signal equal-weight and sell after `hold_days`:
+
+- `breakout`: close is the highest close of the last 50 sessions (today included), volume ≥ 1.5× the
+  average of the 50 sessions before today, 50-day > 200-day average. Strongest volume surge first.
+- `rsi2`: Wilder 2-day RSI < 10 and close > 200-day average (study horizons 3, 5, 10, 15).
+- `rs_leaders`: top 10% of the liquid universe by return from 126 to 21 sessions ago, on the first
+  trading day of each week only.
+
 ## Writing a strategy
 
 Put a `.ts` file in `backtest/strategies/` (copy `strategies/example-low-vol.ts` or

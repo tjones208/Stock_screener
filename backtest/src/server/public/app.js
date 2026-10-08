@@ -503,7 +503,7 @@ async function renderRun(root) {
 // ───────── Studies ─────────
 // Signal study: every signal's forward return vs the strategy's universe on the same days, by year.
 function studyForm() {
-  if (!S.studyForm) S.studyForm = { item: libItems().find((i) => i.strategy === "pullback")?.id ?? libItems()[0]?.id, from: "2005-01-01", to: "2018-12-31", horizons: "5,10,15", overrides: null, name: "" };
+  if (!S.studyForm) S.studyForm = { item: libItems().find((i) => i.strategy === "pullback")?.id ?? libItems()[0]?.id, from: "2005-01-01", to: "2018-12-31", horizons: null, overrides: null, name: "" };
   return S.studyForm;
 }
 const signed = (x) => (x == null || !Number.isFinite(x) ? "—" : `${x >= 0 ? "+" : ""}${(x * 100).toFixed(2)}%`);
@@ -512,6 +512,7 @@ async function renderStudies() {
   if (S.study) return renderStudy(root);
   if (!S.studies) { root.innerHTML = '<div class="card empty">Loading…</div>'; S.studies = await api("/api/studies").catch(() => []); }
   const f = studyForm(), items = libItems(), item = items.find((i) => i.id === f.item) ?? items[0];
+  if (f.horizons == null) f.horizons = (stratDef(item?.strategy)?.studyHorizons ?? [5, 10, 15]).join(",");
   if (f.overrides == null) f.overrides = Object.entries(item?.params ?? {}).map(([k, v]) => `${k}=${v}`).join("\n");
   const list = S.studies;
   root.innerHTML = `
@@ -541,7 +542,7 @@ async function renderStudies() {
           <td><button class="btn danger small" data-sdel="${esc(s.dir)}">Delete</button></td></tr>`).join("")}
       </tbody></table></div>` : '<div class="empty">No studies yet.</div>'}</div>`;
   const keep = () => Object.assign(f, { from: $("#stFrom").value.trim(), to: $("#stTo").value.trim(), horizons: $("#stH").value.trim(), overrides: $("#stOver").value, name: $("#stName").value.trim() });
-  $("#stItem").onchange = (e) => { keep(); f.item = e.target.value; f.overrides = null; renderStudies(); };
+  $("#stItem").onchange = (e) => { keep(); f.item = e.target.value; f.overrides = null; f.horizons = null; renderStudies(); };
   $("#stRefresh").onclick = () => { S.studies = null; renderStudies(); };
   root.querySelectorAll("[data-study]").forEach((a) => (a.onclick = () => { S.study = { dir: a.dataset.study }; renderStudies(); }));
   root.querySelectorAll("[data-sdel]").forEach((b) => (b.onclick = async () => { if (!confirm("Delete this study from disk?")) return; await api(`/api/studies?dir=${encodeURIComponent(b.dataset.sdel)}`, { method: "DELETE" }); S.studies = null; renderStudies(); }));

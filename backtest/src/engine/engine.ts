@@ -51,6 +51,8 @@ export interface StrategyDef<P extends Record<string, unknown> = Record<string, 
   description: string;
   defaults: P;
   fields?: ParamField[];
+  /** Default forward horizons (sessions) for a signal study of this strategy; else 5, 10, 15. */
+  studyHorizons?: number[];
   /** Trading days the strategy watches before it may trade (e.g. to build a regime history), or a function of the parameters. */
   warmupDays: number | ((params: P) => number);
   create(params: P, env: { capital: number }): StrategyInstance;

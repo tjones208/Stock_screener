@@ -120,7 +120,7 @@ async function main() {
       for (const e of errors) log(`Strategy file ${e.file} not loaded: ${e.error}`);
       const def = strategies[a.strategy];
       if (!def) throw new Error(`Unknown strategy "${a.strategy}"`);
-      const horizons = (a.horizons ?? "5,10,15").split(",").map(Number).filter((x) => x > 0);
+      const horizons = (a.horizons ?? (def.studyHorizons ?? [5, 10, 15]).join(",")).split(",").map(Number).filter((x) => x > 0);
       const data = await ParquetSource.open(resolve(a.data), { where: a.where });
       try {
         const params = kv(a.set);

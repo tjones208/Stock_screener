@@ -169,7 +169,7 @@ export async function startServer(o: { port?: number; open?: boolean; host?: str
       if (p === "/api/state" && req.method === "GET") {
         return send(res, 200, {
           settings, presets: readJson<Preset[]>(PRESETS, []), keySet: !!process.env.MASSIVE_API_KEY, node: process.version, platform: process.platform,
-          strategies: Object.values(lib.strategies).map((s) => ({ name: s.name, description: s.description, defaults: s.defaults, fields: s.fields ?? null, source: lib.sources[s.name] ?? "?" })),
+          strategies: Object.values(lib.strategies).map((s) => ({ name: s.name, description: s.description, defaults: s.defaults, fields: s.fields ?? null, studyHorizons: s.studyHorizons ?? null, source: lib.sources[s.name] ?? "?" })),
           strategyErrors: lib.errors, data: await dataStatus(settings.folders.data), jobs: queue.jobs.map((j) => ({ ...j, log: j.log.slice(-200) })),
           strategyFolder: join(BT_ROOT, "strategies"),
         });
