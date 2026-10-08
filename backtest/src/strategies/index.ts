@@ -8,8 +8,9 @@ import { buyHold } from "./buyhold.ts";
 import { smaTiming } from "./sma-timing.ts";
 import { topN } from "./topn.ts";
 import { momentum } from "./momentum.ts";
+import { pullback } from "./pullback.ts";
 
-export const BUILT_IN: StrategyDef[] = [buyHold, smaTiming, topN, momentum] as unknown as StrategyDef[];
+export const BUILT_IN: StrategyDef[] = [buyHold, smaTiming, topN, momentum, pullback] as unknown as StrategyDef[];
 export const STRATEGIES: Record<string, StrategyDef> = Object.fromEntries(BUILT_IN.map((s) => [s.name, s]));
 
 /** Folder for your own strategy files. */

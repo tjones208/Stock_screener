@@ -36,6 +36,11 @@ export type BuyOrder = {
   shares: number | ((price: number) => number);
   /** Limit price: fills at the open if the open is at or under it, else at the limit if the low reaches it. */
   limit?: number;
+  /**
+   * Stop and target for the bought shares, from the fill price, worked the same session after the
+   * open (see SellOrder.stop/target; no gap check: the shares were bought at that open).
+   */
+  exits?: (price: number) => { stop?: number; target?: number } | null;
   tag?: string;
 };
 export type SellOrder = {
@@ -43,6 +48,14 @@ export type SellOrder = {
   /** "all", a share count (lots chosen by `lotOrder`), or explicit lots. */
   shares: number | "all";
   lots?: { id: number; shares: number }[];
+  /**
+   * With a stop and/or target the order is conditional and lasts one session, worked after the
+   * open's market orders: open at or under the stop → sells at the open; low reaches the stop →
+   * at the stop; open at or over the target → at the open; high reaches the target → at the
+   * target. The stop is checked first (conservative). Not triggered → it expires; place it again.
+   */
+  stop?: number;
+  target?: number;
   tag?: string;
 };
 export type Order = BuyOrder | SellOrder;

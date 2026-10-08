@@ -1,9 +1,9 @@
 // Daily event loop. Each trading day: dividends (ex-date) → work yesterday's orders at today's open
-// (sells first, then buys) → delisting check → mark to market at the close → the strategy sees the
-// close and places orders for the next session. No look-ahead: a strategy only sees rows up to today.
+// (sells first, then buys) → stop / target orders through the session → delisting check → mark to
+// market at the close → the strategy sees the close and places orders for the next session. No look-ahead: a strategy only sees rows up to today.
 import { isMonthEnd, isWeekEnd, type Calendar } from "../../../lib/momentum/calendar.ts";
 import { Portfolio, type LotOrder } from "./portfolio.ts";
-import type { ClosedLot, Dividend, EquityPoint, Fill, Lot, Order, Row, TickerInfo, Unfilled } from "./types.ts";
+import type { ClosedLot, Dividend, EquityPoint, Fill, Lot, Order, Row, SellOrder, TickerInfo, Unfilled } from "./types.ts";
 
 export interface DataSource {
   /** Trading days, sorted. */
@@ -48,8 +48,8 @@ export interface StrategyDef<P extends Record<string, unknown> = Record<string, 
   description: string;
   defaults: P;
   fields?: ParamField[];
-  /** Trading days the strategy watches before it may trade (e.g. to build a regime history). */
-  warmupDays: number;
+  /** Trading days the strategy watches before it may trade (e.g. to build a regime history), or a function of the parameters. */
+  warmupDays: number | ((params: P) => number);
   create(params: P, env: { capital: number }): StrategyInstance;
 }
 
@@ -85,14 +85,16 @@ export async function runBacktest(data: DataSource, def: StrategyDef, params: Re
   const startIdx = all.findIndex((d) => d >= opt.from);
   const endIdx = (() => { let k = -1; for (let j = 0; j < all.length; j++) if (all[j] <= opt.to) k = j; return k; })();
   if (startIdx < 0 || endIdx < startIdx) throw new Error(`No trading days between ${opt.from} and ${opt.to}`);
-  const firstIdx = Math.max(0, startIdx - def.warmupDays);
+  const merged = { ...def.defaults, ...params };
+  const warmup = typeof def.warmupDays === "function" ? def.warmupDays(merged) : def.warmupDays;
+  const firstIdx = Math.max(0, startIdx - warmup);
   const slip = (opt.slippageBps ?? 0) / 10_000;
   const commission = opt.commission ?? 0;
   const delistAfter = opt.delistAfter ?? 10;
   const chunk = opt.chunkDays ?? 21;
 
   const pf = new Portfolio(opt.capital);
-  const strat = def.create({ ...def.defaults, ...params }, { capital: opt.capital });
+  const strat = def.create(merged, { capital: opt.capital });
   const tickers = data.tickers();
   const divs = data.dividends();
   const equity: EquityPoint[] = [];
@@ -130,7 +132,9 @@ export async function runBacktest(data: DataSource, def: StrategyDef, params: Re
       const since = new Map(pendingSells.map((p) => [p.order, p.since]));
       pendingSells = [];
       pending = [];
-      for (const o of orders.filter((x) => x.side === "sell")) {
+      const isCond = (o: Order) => o.side === "sell" && (o.stop != null || o.target != null);
+      const cond: { o: SellOrder; sameDay: boolean }[] = orders.filter(isCond).map((o) => ({ o: o as SellOrder, sameDay: false }));
+      for (const o of orders.filter((x) => x.side === "sell" && !isCond(x))) {
         if (o.side !== "sell") continue;
         const bar = today.get(o.ticker);
         if (!bar) { pendingSells.push({ order: o, since: since.get(o) ?? i }); continue; }
@@ -160,6 +164,30 @@ export async function runBacktest(data: DataSource, def: StrategyDef, params: Re
         const f: Fill = { d, side: "buy", ticker: o.ticker, shares, price, tag: o.tag, lotId: lot.id };
         fills.push(f);
         strat.onFill?.(f, ctx, lot);
+        const ex = o.exits?.(price);
+        if (ex && (ex.stop != null || ex.target != null)) {
+          cond.push({ o: { side: "sell", ticker: o.ticker, shares, lots: [{ id: lot.id, shares }], stop: ex.stop, target: ex.target }, sameDay: true });
+        }
+      }
+
+      // 2b. Stop / target orders through the session (no bar today → the order lapses).
+      for (const { o, sameDay } of cond) {
+        const bar = today.get(o.ticker);
+        if (!bar || pf.sharesOf(o.ticker) <= 0) continue;
+        let px: number | null = null, why = "";
+        if (o.stop != null && !sameDay && bar.o <= o.stop) { px = bar.o; why = "stop_gap"; }
+        else if (o.stop != null && bar.l <= o.stop) { px = o.stop; why = "stop"; }
+        else if (o.target != null && !sameDay && bar.o >= o.target) { px = bar.o; why = "target_gap"; }
+        else if (o.target != null && bar.h >= o.target) { px = o.target; why = "target"; }
+        if (px == null) continue;
+        const price = px * (1 - slip), tag = why;
+        const closed = o.lots ? pf.sellLots(o.lots, price, d, commission, tag) : pf.sell(o.ticker, o.shares, price, d, opt.lotOrder, commission, tag);
+        const shares = closed.reduce((a, c) => a + c.shares, 0);
+        if (shares > 0) {
+          const f: Fill = { d, side: "sell", ticker: o.ticker, shares, price, tag };
+          fills.push(f);
+          strat.onFill?.(f, ctx, undefined, closed);
+        }
       }
 
       // 3. Delisted or long-halted holdings: closed at the last known close.
