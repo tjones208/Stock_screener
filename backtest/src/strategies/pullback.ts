@@ -97,6 +97,16 @@ export const pullback: StrategyDef<PbParams> = {
         }
         return orders;
       },
+      // The liquidity filter alone (price, dollar volume, common stock): a signal study's baseline.
+      universe(ctx) {
+        const out: string[] = [];
+        for (const r of ctx.today.values()) {
+          if (r.ticker === p.market_ticker || r.c < p.min_price || !(hist.get(r.ticker)!.avgDv >= p.min_avg_dollar_vol)) continue;
+          if (p.common_only) { const type = ctx.tickers.get(r.ticker)?.type; if (type && type !== "CS") continue; }
+          out.push(r.ticker);
+        }
+        return out;
+      },
       onFill(f, ctx) {
         if (f.side === "buy") {
           const stop = stopFor.get(f.ticker)!;

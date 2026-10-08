@@ -11,6 +11,7 @@ import { loadStrategies } from "./strategies/index.ts";
 import { grid, statsLine } from "./report.ts";
 import { runBatch, type BatchEvent, type BatchSpec } from "./batch.ts";
 import { loadEnv } from "./env.ts";
+import { runStudy, studyTable, writeStudy } from "./study.ts";
 
 const HELP = `bt — backtests on Massive flat files with the app's strategy rules
 
@@ -25,6 +26,8 @@ const HELP = `bt — backtests on Massive flat files with the app's strategy rul
                 [--slippage-bps 10] [--commission 0] [--bench SPY,MTUM] [--tax 0.30,0.15] [--where "c >= 1"] [--out results]
   bt sweep      same as run, plus --grid key=v1,v2,... (repeatable)
   bt batch      --data <dir> --spec batch.json [--out results]   several strategies / settings in one batch
+  bt study      --data <dir> --strategy pullback [--from] [--to] [--horizons 5,10,15] [--set key=value ...] [--out results]
+                every signal's forward return vs the strategy's universe on the same days, by year
   Add --events to print progress as JSON lines (used by the app).
 `;
 
@@ -48,7 +51,7 @@ async function main() {
       set: { type: "string", multiple: true }, grid: { type: "string", multiple: true },
       "slippage-bps": { type: "string", default: "10" }, commission: { type: "string", default: "0" },
       bench: { type: "string", default: "SPY,MTUM" }, tax: { type: "string", default: "0.30,0.15" },
-      where: { type: "string" }, name: { type: "string" }, spec: { type: "string" },
+      where: { type: "string" }, name: { type: "string" }, spec: { type: "string" }, horizons: { type: "string" },
       src: { type: "string" }, dest: { type: "string" }, group: { type: "string" }, force: { type: "boolean" },
       events: { type: "boolean" }, port: { type: "string" }, "no-open": { type: "boolean" },
     },
@@ -106,6 +109,28 @@ async function main() {
       try {
         const r = await runBatch(data, spec, resolve(a.out ?? "results"), ev);
         if (!a.events) for (const [t, s] of Object.entries(r.bench)) console.log(statsLine(`${t} (buy & hold)`, s));
+      } finally {
+        data.close();
+      }
+      return;
+    }
+    case "study": {
+      if (!a.data) throw new Error("study needs --data (a folder made by bt prepare)");
+      const { strategies, errors } = await loadStrategies();
+      for (const e of errors) log(`Strategy file ${e.file} not loaded: ${e.error}`);
+      const def = strategies[a.strategy];
+      if (!def) throw new Error(`Unknown strategy "${a.strategy}"`);
+      const horizons = (a.horizons ?? "5,10,15").split(",").map(Number).filter((x) => x > 0);
+      const data = await ParquetSource.open(resolve(a.data), { where: a.where });
+      try {
+        const params = kv(a.set);
+        log(`Signal study: ${def.name}${Object.keys(params).length ? ` (${Object.entries(params).map(([k, v]) => `${k}=${v}`).join(", ")})` : ""}, ${a.from ?? "start"} → ${a.to ?? "end"}, horizons ${horizons.join("/")} sessions`);
+        const { result, signals } = await runStudy(data, def, { strategy: def.name, params, from: a.from, to: a.to, horizons, name: a.name },
+          (done, total) => progress(done, total, "Scanning days"));
+        const dir = writeStudy(resolve(a.out ?? "results"), result, signals);
+        for (const line of studyTable(result).split("\n")) log(line);
+        log(`Signals without a next-day bar: ${result.noEntry.signals}; past the end of the data: ${result.incomplete}.`);
+        ev({ type: "done", dir });
       } finally {
         data.close();
       }

@@ -152,6 +152,19 @@ Python `Params`, plus `market_ma`); set capital and slippage on the run. Matches
 Python trade for trade with `rs_universe = all` and `market_ma = 200` (the Python filtered on the
 200-day); the default `liquid` ranks relative strength among tradable stocks only.
 
+### Signal studies (Studies tab, `bt study`)
+
+Every entry signal a strategy gives (filled or not: the strategy runs with an empty portfolio that
+never fills), with its average return from the next day's open to the close of session 5, 10 and 15
+(counting the entry day), against every stock in the strategy's universe (its liquidity filter, via
+the strategy's `universe(ctx)`) on the same signal days, by year. Split-adjusted prices, no
+dividends or costs; a stock that stops trading counts at its last close. Output in
+`results/studies/<stamp>-<name>/`: study.csv (the table), study.json and signals.csv (every signal).
+
+```
+npm run bt -- study --data ~/massive/bt --strategy pullback --from 2005-01-01 --to 2018-12-31 [--set market_ma=200]
+```
+
 ## Writing a strategy
 
 Put a `.ts` file in `backtest/strategies/` (copy `strategies/example-low-vol.ts` or

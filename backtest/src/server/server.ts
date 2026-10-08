@@ -247,6 +247,19 @@ export async function startServer(o: { port?: number; open?: boolean; host?: str
               ...(typeof b.where === "string" && b.where ? ["--where", b.where] : [])]);
             break;
           }
+          case "study": {
+            const st = String(b.strategy ?? "");
+            if (!lib.strategies[st]) throw new Error(`Unknown strategy "${st}".`);
+            const params = (b.params && typeof b.params === "object" ? b.params : {}) as Record<string, unknown>;
+            const date = (v: unknown) => (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v.trim()) ? v.trim() : "");
+            const horizons = String(b.horizons ?? "5,10,15").split(",").map((x) => Math.round(Number(x))).filter((x) => x > 0 && x <= 260);
+            if (!horizons.length) throw new Error("Enter at least one horizon in sessions, e.g. 5,10,15.");
+            const from = date(b.from), to = date(b.to), name = typeof b.name === "string" ? b.name.trim().slice(0, 80) : "";
+            job = queue.add("study", `Signal study: ${name || st}`, ["study", "--data", need(f.data, "prepared data"), "--strategy", st, "--out", f.results,
+              "--horizons", horizons.join(","), ...(from ? ["--from", from] : []), ...(to ? ["--to", to] : []), ...(name ? ["--name", name] : []),
+              ...Object.entries(params).flatMap(([k, v]) => ["--set", `${k}=${v}`])]);
+            break;
+          }
           default: return send(res, 400, { error: "Unknown job" });
         }
         return send(res, 200, job);
@@ -287,6 +300,28 @@ export async function startServer(o: { port?: number; open?: boolean; host?: str
         const equity = thin(readCsv(join(run, "equity.csv")) as { d: string; equity: number; invested: number; positions: number }[]);
         const bench = Object.fromEntries(readdirSync(d).filter((x) => x.startsWith("bench-")).map((x) => [x.slice(6), thin(readCsv(join(d, x, "equity.csv")) as { d: string; equity: number }[]).map((r) => [r.d, r.equity])]));
         return send(res, 200, { summary, path: run, equity: equity.map((r) => [r.d, r.equity, r.invested, r.positions]), bench, trades: readCsv(join(run, "trades.csv"), 20000) });
+      }
+      // Signal studies: <results>/studies/<stamp>-<name>/study.json
+      const studies = join(root, "studies");
+      if (p === "/api/studies" && req.method === "GET") {
+        if (!existsSync(studies)) return send(res, 200, []);
+        const list = readdirSync(studies).map((name) => ({ name, s: readJson<Record<string, unknown> | null>(join(studies, name, "study.json"), null) }))
+          .filter((x) => x.s).map(({ name, s }) => ({ dir: name, name: s!.name, created: s!.created, strategy: s!.strategy, params: s!.params, from: s!.from, to: s!.to,
+            horizons: s!.horizons, all: (s!.rows as unknown[]).at(-1) }));
+        return send(res, 200, list.sort((a, b) => String(b.created).localeCompare(String(a.created))));
+      }
+      const studyDir = () => {
+        const d = join(studies, String(url.searchParams.get("dir") ?? ""));
+        if (!inside(studies, d) || !existsSync(join(d, "study.json"))) throw new Error("Not found");
+        return d;
+      };
+      if (p === "/api/studies/one" && req.method === "GET") {
+        const d = studyDir();
+        return send(res, 200, { ...readJson<Record<string, unknown>>(join(d, "study.json"), {}), dir: url.searchParams.get("dir"), path: d });
+      }
+      if (p === "/api/studies" && req.method === "DELETE") {
+        rmSync(studyDir(), { recursive: true, force: true });
+        return send(res, 200, { ok: true });
       }
       if (p === "/api/results" && req.method === "DELETE") {
         const d = dirParam();

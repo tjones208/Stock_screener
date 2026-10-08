@@ -39,6 +39,8 @@ export interface StrategyInstance {
   onClose(ctx: Ctx): Order[];
   onFill?(fill: Fill, ctx: Ctx, lot?: Lot, closed?: ClosedLot[]): void;
   onUnfilled?(u: Unfilled, ctx: Ctx): void;
+  /** Tickers the strategy picks from today (after its liquidity filters): the baseline of a signal study. */
+  universe?(ctx: Ctx): string[];
 }
 
 /** Form metadata for a parameter (labels, groups, allowed values); optional. */
