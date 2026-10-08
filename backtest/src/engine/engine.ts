@@ -1,6 +1,7 @@
 // Daily event loop. Each trading day: dividends (ex-date) → work yesterday's orders at today's open
 // (sells first, then buys) → stop / target orders through the session → delisting check → mark to
-// market at the close → the strategy sees the close and places orders for the next session. No look-ahead: a strategy only sees rows up to today.
+// market at the close → the strategy sees the close and places orders for the next session. No
+// look-ahead: a strategy only sees rows up to today.
 import { isMonthEnd, isWeekEnd, type Calendar } from "../../../lib/momentum/calendar.ts";
 import { Portfolio, type LotOrder } from "./portfolio.ts";
 import type { ClosedLot, Dividend, EquityPoint, Fill, Lot, Order, Row, SellOrder, TickerInfo, Unfilled } from "./types.ts";
