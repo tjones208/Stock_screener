@@ -55,9 +55,12 @@ export async function runScan() {
   const p = s.params;
   const N = pbHistoryBars(p);
   const warnings: string[] = [];
-  const uni = await fetchAll<Universe>((a, b) => db().rpc("ss_pb_universe", {
+  // One JSON value (a set result would be paged 1,000 rows at a time, re-running the query per page).
+  const { data: u, error: ue } = await db().rpc("ss_pb_universe_json", {
     p_days: N, p_lookback: p.rs_lookback, p_dv_days: p.dollar_vol_lookback, p_mid: p.mid_ma, p_slow: p.slow_ma, p_market: p.market_ticker,
-  }).range(a, b));
+  });
+  if (ue) throw new Error(`ss_pb_universe_json: ${ue.message}`);
+  const { total, rows: uni } = u as { total: number; rows: Universe[] };
   const open = trades.filter((t) => !t.exit_d);
   const held = new Set(open.map((t) => t.ticker));
 
@@ -119,7 +122,7 @@ export async function runScan() {
   const stale = calendarDaysBetween(d, nyToday()) > 4;
   if (stale) warnings.push(`The latest bars are from ${d}: the nightly data job may be failing, so these lists are out of date.`);
   const funnel = [
-    { step: `Bar on ${d}`, count: uni.length },
+    { step: `Bar on ${d}`, count: total },
     { step: p.common_only ? "Common stock, enough history" : "Enough history", count: base.length },
     { step: `Close ≥ $${p.min_price}, ${p.dollar_vol_lookback}-day dollar volume ≥ $${(p.min_avg_dollar_vol / 1e6).toFixed(0)}M`, count: liquid.length },
     { step: `Relative strength ≥ ${Math.round(p.rs_min_percentile * 100)}th percentile`, count: strong.length },
