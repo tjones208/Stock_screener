@@ -10,7 +10,11 @@ import type { DataSource } from "./engine/engine.ts";
 import type { Stats, TaxRates } from "./engine/metrics.ts";
 import { runOne, sweepCsv, writeRun, type RunSpec } from "./report.ts";
 
-export type BatchRun = { label?: string; strategy: string; params?: Record<string, unknown> };
+export type BatchRun = {
+  label?: string; strategy: string; params?: Record<string, unknown>;
+  /** "sectors": run only when the data has SIC codes (Download reference with details); otherwise skipped with a note. */
+  requires?: "sectors";
+};
 export type BatchSpec = {
   name?: string;
   from?: string;
@@ -60,8 +64,13 @@ export async function runBatch(data: DataSource, spec: BatchSpec, resultsDir: st
   }
 
   const rows: { folder: string; label: string; strategy: string; params: Record<string, unknown>; stats: Stats }[] = [];
+  const hasSectors = [...data.tickers().values()].some((t) => !!t.sic_code);
   for (const [k, r] of spec.runs.entries()) {
     const label = runLabel(r);
+    if (r.requires === "sectors" && !hasSectors) {
+      emit({ type: "log", text: `Skipped "${label}": the data has no sector (SIC) codes. Download reference data with ticker details, run Prepare again, then rerun this batch.` });
+      continue;
+    }
     const runSpec: RunSpec = { strategy: r.strategy, params: r.params ?? {}, opt: { ...opt, onProgress: (done, total) => emit({ type: "progress", run: k + 1, runs: spec.runs.length, label, done, total }) }, tax };
     const res = await runOne(data, runSpec);
     const folder = `run-${String(k + 1).padStart(3, "0")}-${slug(label)}`;

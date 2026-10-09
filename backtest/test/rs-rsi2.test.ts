@@ -81,3 +81,20 @@ test("rs_rsi2 sizing=equal: equity ÷ max_positions in whole shares, no heat cap
   const ds30 = await run(market({ dropCloseX: [310, 0.25] }), { sizing: "equal", stop_atr: null, disaster_stop_pct: 0.3 });
   assert.equal(ds30.closed.find((c) => c.ticker === "X")!.exitTag, "time_stop");
 });
+
+test("rs_rsi2: max_atr_pct skips volatile signals; max_per_sector caps positions per SIC sector", async () => {
+  // X's ATR ≈ 2 on a ~55 close (≈3.7%): kept at 0.04, skipped at 0.03.
+  const ratio = atrX(301) / (40 + 301 * 0.05 - dipX(301));
+  assert.ok(ratio > 0.03 && ratio < 0.04);
+  const keep = await run(market(), { sizing: "equal", stop_atr: null, max_atr_pct: 0.04 });
+  const skip = await run(market(), { sizing: "equal", stop_atr: null, max_atr_pct: 0.03 });
+  assert.equal(keep.fills.filter((f) => f.side === "buy" && f.ticker === "X").length, 1);
+  assert.equal(skip.fills.filter((f) => f.side === "buy").length, 0);
+  // X and Y both signal on day 301; with the same SIC code and max_per_sector 1, only one is bought.
+  const sameSector = () => { const src = market({ withY: true }); for (const t of ["X", "Y"]) src.tickers().get(t)!.sic_code = "7372"; return src; };
+  const capped = await run(sameSector(), { sizing: "equal", stop_atr: null, max_per_sector: 1 });
+  const free = await run(sameSector(), { sizing: "equal", stop_atr: null });
+  const buys = (r: Awaited<ReturnType<typeof run>>) => r.fills.filter((f) => f.side === "buy" && f.d === D[302]).map((f) => f.ticker).sort();
+  assert.deepEqual(buys(free), ["X", "Y"]);
+  assert.deepEqual(buys(capped), ["X"]);
+});

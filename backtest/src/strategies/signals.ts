@@ -6,6 +6,7 @@
 // for with an empty portfolio, so the study and the backtest use the same entry rule.
 import { isWeekEnd } from "../../../lib/momentum/calendar.ts";
 import { pctRank } from "../../../lib/pullback/core.ts";
+import { momSector } from "../../../lib/momentum/sector-key.ts";
 import type { Ctx, ParamField, StrategyDef } from "../engine/engine.ts";
 import type { Order, Row } from "../engine/types.ts";
 
@@ -190,11 +191,12 @@ function signalStrategy<P extends Base>(spec: Spec<P>): StrategyDef<P> {
 
 type Risk = Filters & {
   max_hold_days: number; stop_atr: number | null; atr_period: number; reward_risk: number | null; disaster_stop_pct: number | null;
+  max_atr_pct: number | null; max_per_sector: number | null;
   sizing: string; risk_per_trade: number; max_position_pct: number; max_positions: number; max_portfolio_heat: number;
 };
 const RISK: Risk = {
   ...FILTERS, max_hold_days: 20, stop_atr: 3, atr_period: 14, reward_risk: null, disaster_stop_pct: null,
-  sizing: "risk", risk_per_trade: 0.0075, max_position_pct: 0.2, max_positions: 8, max_portfolio_heat: 0.045,
+  max_atr_pct: null, max_per_sector: null, sizing: "risk", risk_per_trade: 0.0075, max_position_pct: 0.2, max_positions: 8, max_portfolio_heat: 0.045,
 };
 const RISK_FIELDS: ParamField[] = [
   ...FILTER_FIELDS,
@@ -204,6 +206,10 @@ const RISK_FIELDS: ParamField[] = [
   { key: "reward_risk", label: "Target: R multiple of the stop distance (null = none)", group: "Exits" },
   { key: "disaster_stop_pct", label: "Disaster stop: close this far under entry (null = none)", group: "Exits",
     help: "e.g. 0.20: a close 20% or more below the entry sells at the next open." },
+  { key: "max_atr_pct", label: "Skip signals with ATR ÷ close over (null = off)", group: "Entry filters",
+    help: "e.g. 0.06: skip a signal when the 14-day ATR is more than 6% of the close." },
+  { key: "max_per_sector", label: "Max positions per sector (null = off)", group: "Entry filters",
+    help: "Sectors come from SIC codes (Download reference with details). A stock without one is its own sector." },
   { key: "sizing", label: "Sizing", group: "Risk & sizing", choices: ["risk", "equal"],
     help: "risk: risk_per_trade over the stop distance, capped by max_position_pct and the heat cap. equal: equity ÷ max_positions each, no heat cap." },
   { key: "risk_per_trade", label: "Risk per trade (fraction of equity, risk sizing)", group: "Risk & sizing" },
@@ -229,7 +235,14 @@ function riskStrategy<P extends Risk>(spec: Spec<P>): StrategyDef<P> {
     name: spec.name, description: spec.description, defaults, fields: [...spec.fields, ...RISK_FIELDS], studyHorizons: spec.studyHorizons,
     warmupDays: warmupOf(spec, (p) => p.atr_period + 1),
     create(raw) {
-      const p = { ...raw, stop_atr: optNum(raw.stop_atr), reward_risk: optNum(raw.reward_risk), disaster_stop_pct: optNum(raw.disaster_stop_pct) } as P;
+      const p = { ...raw, stop_atr: optNum(raw.stop_atr), reward_risk: optNum(raw.reward_risk), disaster_stop_pct: optNum(raw.disaster_stop_pct),
+        max_atr_pct: optNum(raw.max_atr_pct), max_per_sector: optNum(raw.max_per_sector) } as P;
+      const sectors = new Map<string, string>(); // ticker → sector, for max_per_sector
+      const sectorOf = (ctx: Ctx, t: string) => {
+        let s = sectors.get(t);
+        if (s == null) sectors.set(t, (s = momSector({ ticker: t, sic_code: ctx.tickers.get(t)?.sic_code ?? null })));
+        return s;
+      };
       const equal = p.sizing === "equal";
       const sc = scanner(spec, p, p.atr_period + 1);
       type Pos = { shares: number; entry: number; dist: number; stop: number | null; target: number | null; bars: number };
@@ -261,14 +274,17 @@ function riskStrategy<P extends Risk>(spec: Spec<P>): StrategyDef<P> {
           for (const t of spec.signals(ctx, liquid, p)) {
             if (pos.has(t) || ctx.portfolio.sharesOf(t) > 0) continue;
             const atr = sc.tapes.get(t)!.t.atr(p.atr_period);
-            const needAtr = !equal || p.stop_atr != null || p.reward_risk != null;
+            const needAtr = !equal || p.stop_atr != null || p.reward_risk != null || p.max_atr_pct != null;
             if (needAtr && !(atr > 0)) continue;
+            if (p.max_atr_pct != null && atr / ctx.row(t)!.c > p.max_atr_pct) continue;
+            const sector = p.max_per_sector != null ? sectorOf(ctx, t) : "";
             const dist = atr > 0 ? (p.stop_atr ?? 3) * atr : 0;
             distFor.set(t, dist);
             orders.push({
               side: "buy", ticker: t, tag: "entry",
               shares: (price) => {
                 if (pos.size >= p.max_positions) return 0;
+                if (p.max_per_sector != null && [...pos.keys()].filter((h) => sectorOf(ctx, h) === sector).length >= p.max_per_sector) return 0;
                 if (equal) return Math.max(0, Math.min(Math.floor(eqPrev / p.max_positions / price), Math.floor(cash / price)));
                 if (!(price > dist)) return 0;
                 const n = Math.min(Math.floor((eqPrev * p.risk_per_trade) / dist), Math.floor((eqPrev * p.max_position_pct) / price), Math.floor(cash / price));

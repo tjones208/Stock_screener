@@ -105,3 +105,19 @@ test("engine: a buy limit under the open fills at the limit when the low reaches
 test("sweep grid: cartesian product", () => {
   assert.deepEqual(grid({ a: [1, 2], b: ["x", "y"] }), [{ a: 1, b: "x" }, { a: 1, b: "y" }, { a: 2, b: "x" }, { a: 2, b: "y" }]);
 });
+
+test("batch: a run that requires sectors is skipped when the data has no SIC codes", async () => {
+  const { runBatch } = await import("../src/batch.ts");
+  const { mkdtempSync, existsSync, readFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const days = weekdays("2024-01-01", 30);
+  const src = new MemorySource(days.flatMap((d, i) => [row("SPY", d, 100 + i, 100 + i), row("A", d, 50, 50)]));
+  const logs: string[] = [];
+  const out = mkdtempSync(join(tmpdir(), "bt-req-"));
+  const r = await runBatch(src, { name: "req", from: days[0], to: days[29], bench: [], runs: [
+    { strategy: "buyhold", label: "plain" }, { strategy: "buyhold", label: "needs sectors", requires: "sectors" }] }, out, (e) => { if (e.type === "log") logs.push(e.text); });
+  assert.deepEqual(r.rows.map((x) => x.label), ["plain"]);
+  assert.ok(logs.some((l) => /Skipped "needs sectors".*no sector/.test(l)));
+  assert.ok(existsSync(join(r.dir, "batch-req.csv")) && readFileSync(join(r.dir, "batch-req.csv"), "utf8").includes("plain"));
+});

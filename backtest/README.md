@@ -180,6 +180,9 @@ SPY above its 200-day average; as backtests they buy every signal equal-weight a
   more signals than slots, `rank_by` picks: `rs` (strongest first) or `rsi2` (most oversold first).
   `sizing: "equal"` gives each position equity ÷ `max_positions` (whole shares, no heat cap, no
   max_position_pct); `disaster_stop_pct` (e.g. 0.20) sells at the next open after a close that far under entry.
+  Entry filters: `max_atr_pct` (e.g. 0.06) skips a signal whose 14-day ATR is more than that share of the
+  close; `max_per_sector` caps positions per sector (SIC codes from Download reference with details;
+  a stock without one is its own sector).
 - `rs_leaders`: top 10% of the liquid universe by return from 126 to 21 sessions ago, on the first
   trading day of each week only (horizons 10, 20, 40, 60).
 
@@ -192,8 +195,10 @@ which also writes `<stamp>-<name>-summary.csv` (each study's all-years row, one 
 ### Saved batches
 
 JSON files in `backtest/batches/` (e.g. `rs_rsi2.json`: the rs_rsi2 variants, 2005–2018, $125,000,
-10 bps, SPY; `rs_rsi2-equal.json`: equal-weight variants with no ATR stop, $25,000) appear on the Strategies tab with a Run button, or run `bt batch --data … --spec
-batches/rs_rsi2.json`. A named batch also writes `batch-<name>.json` and `batch-<name>.csv`. A setting
+10 bps, SPY; `rs_rsi2-equal.json`: equal-weight variants with no ATR stop, $25,000; `rs_rsi2-vol.json`: ATR and
+sector filters) appear on the Strategies tab with a Run button, or run `bt batch --data … --spec
+batches/rs_rsi2.json`. A named batch also writes `batch-<name>.json` and `batch-<name>.csv`. A run with
+`"requires": "sectors"` is skipped (with a note in the log) when the data has no SIC codes. A setting
 can be switched off with `null` (in JSON, `--set stop_atr=null`, or typed into the app).
 
 ## Writing a strategy
