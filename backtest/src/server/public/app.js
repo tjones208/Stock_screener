@@ -502,11 +502,23 @@ async function renderRun(root) {
 
 // ───────── Studies ─────────
 // Signal study: every signal's forward return vs the strategy's universe on the same days, by year.
+// Several studies can be queued as one batch (one job, one summary CSV).
 function studyForm() {
-  if (!S.studyForm) S.studyForm = { item: libItems().find((i) => i.strategy === "pullback")?.id ?? libItems()[0]?.id, from: "2005-01-01", to: "2018-12-31", horizons: null, overrides: null, name: "" };
+  if (!S.studyForm) S.studyForm = { item: libItems().find((i) => i.strategy === "pullback")?.id ?? libItems()[0]?.id, from: "2005-01-01", to: "2018-12-31", horizons: null, overrides: null, name: "", cost: "0.20", batch: [], batchName: "" };
   return S.studyForm;
 }
 const signed = (x) => (x == null || !Number.isFinite(x) ? "—" : `${x >= 0 ? "+" : ""}${(x * 100).toFixed(2)}%`);
+function studyParams(item, text) {
+  const def = stratDef(item.strategy), params = {};
+  for (const line of String(text || "").split(/[\n;]+/).map((x) => x.trim()).filter(Boolean)) {
+    const i = line.indexOf("=");
+    if (i < 1) throw new Error(`"${line}" should look like key=value`);
+    const k = line.slice(0, i).trim();
+    if (!(k in def.defaults)) throw new Error(`${item.strategy} has no setting "${k}"`);
+    params[k] = coerce(line.slice(i + 1).trim(), def.defaults[k]);
+  }
+  return params;
+}
 async function renderStudies() {
   const root = $("#tab-studies");
   if (S.study) return renderStudy(root);
@@ -519,62 +531,70 @@ async function renderStudies() {
     <div class="card"><h2>Signal study</h2>
       <p class="small muted">Takes <b>every</b> entry signal the strategy gives (filled or not, no position limits) and measures the return from the next day's open
         to the close of the Nth session (counting the entry day), against every stock in the strategy's universe (its liquidity filter) on the same signal days.
-        Split-adjusted prices, no dividends or costs. A stock that stops trading counts at its last close.</p>
+        Split-adjusted prices, no dividends. <b>Cost-adjusted</b> = signal return minus the cost below (round-trip slippage); a stock that stops trading counts at its last close.</p>
       <div class="row">
         <label class="field">Strategy or preset<select id="stItem">${items.map((i) => `<option value="${esc(i.id)}" ${i.id === item?.id ? "selected" : ""}>${esc(i.kind === "preset" ? `Preset: ${i.name}` : i.name)}</option>`).join("")}</select></label>
         <label class="field">From<input id="stFrom" value="${esc(f.from)}" placeholder="YYYY-MM-DD" style="width:130px"/></label>
         <label class="field">To<input id="stTo" value="${esc(f.to)}" placeholder="YYYY-MM-DD" style="width:130px"/></label>
-        <label class="field">Horizons (sessions)<input id="stH" value="${esc(f.horizons)}" style="width:110px"/></label>
+        <label class="field">Horizons (sessions)<input id="stH" value="${esc(f.horizons)}" style="width:120px"/></label>
+        <label class="field">Cost per signal (%)<input id="stCost" value="${esc(f.cost)}" style="width:90px"/></label>
         <label class="field">Name<input id="stName" value="${esc(f.name)}" placeholder="optional" style="width:180px"/></label>
       </div>
       <label class="field" style="margin-top:10px"><span>Setting changes, one per line (e.g. <code>market_ma=200</code>); blank = the strategy's defaults</span>
-        <textarea id="stOver" rows="3" style="font:inherit;font-family:ui-monospace,Consolas,monospace;width:100%;max-width:520px">${esc(f.overrides)}</textarea></label>
+        <textarea id="stOver" rows="3" style="font-family:ui-monospace,Consolas,monospace;width:100%;max-width:520px">${esc(f.overrides)}</textarea></label>
       <div class="row spread" style="margin-top:12px"><span class="small muted">${item ? esc(item.desc) : ""}</span>
-        <button class="btn primary" id="stRun" ${item && S.state.data.ready ? "" : "disabled"}>Run study</button></div>
+        <div class="row"><button class="btn" id="stAdd" ${item ? "" : "disabled"}>Add to batch</button>
+        <button class="btn primary" id="stRun" ${item && S.state.data.ready ? "" : "disabled"}>Run this study</button></div></div>
       ${S.state.data.ready ? "" : '<p class="small warn">Prepare data first (Data tab).</p>'}
     </div>
+    ${f.batch.length ? `<div class="card"><div class="row spread"><h2>Batch (${f.batch.length})</h2>
+        <div class="row"><label class="field">Batch name<input id="stBName" value="${esc(f.batchName)}" placeholder="Study batch" style="width:180px"/></label>
+        <button class="btn" id="stClear">Clear</button><button class="btn primary" id="stRunBatch" ${S.state.data.ready ? "" : "disabled"}>Run batch</button></div></div>
+      <p class="small muted">One job, ${esc(f.from || "start")} → ${esc(f.to || "end")}, cost ${esc(f.cost)}% per signal (the From / To / cost above apply to every study). Writes one study per line plus a summary CSV.</p>
+      <div class="tablewrap"><table><thead><tr><th class="l">Study</th><th class="l">Strategy</th><th>Horizons</th><th class="l">Settings</th><th></th></tr></thead><tbody>
+        ${f.batch.map((b, k) => `<tr><td class="l">${esc(b.name || b.strategy)}</td><td class="l">${esc(b.strategy)}</td><td>${esc(b.horizons)}</td>
+          <td class="l small">${esc(Object.entries(b.params).map(([x, v]) => `${x}=${v}`).join(" ")) || '<span class="muted">defaults</span>'}</td>
+          <td><button class="btn small danger" data-brm="${k}">Remove</button></td></tr>`).join("")}
+      </tbody></table></div></div>` : ""}
     <div class="card"><div class="row spread"><h2>Past studies</h2><button class="btn" id="stRefresh">Refresh</button></div>
-      ${list.length ? `<div class="tablewrap"><table><thead><tr><th class="l">Study</th><th>Period</th><th>Signals</th><th colspan="3">Edge over the universe (all years)</th><th></th></tr></thead><tbody>
-        ${list.map((s) => `<tr><td class="l"><a data-study="${esc(s.dir)}">${esc(s.name)}</a><div class="small muted">${esc(String(s.created).slice(0, 16).replace("T", " "))}${Object.keys(s.params || {}).length ? ` · ${esc(Object.entries(s.params).map(([k, v]) => `${k}=${v}`).join(" "))}` : ""}</div></td>
+      ${list.length ? `<div class="tablewrap"><table><thead><tr><th class="l">Study</th><th>Period</th><th>Signals</th><th colspan="4">Edge over the universe, after cost (all years)</th><th></th></tr></thead><tbody>
+        ${list.map((s) => `<tr><td class="l"><a data-study="${esc(s.dir)}">${esc(s.name)}</a><div class="small muted">${esc(String(s.created).slice(0, 16).replace("T", " "))} · ${s.cost != null ? `cost ${pct(s.cost, 2)}` : "before costs"}${Object.keys(s.params || {}).length ? ` · ${esc(Object.entries(s.params).map(([k, v]) => `${k}=${v}`).join(" "))}` : ""}</div></td>
           <td>${esc(s.from)} → ${esc(s.to)}</td><td>${num(s.all?.signals, 0)}</td>
-          ${(s.horizons || []).slice(0, 3).map((h, k) => `<td class="${(s.all?.edge?.[k] ?? 0) >= 0 ? "good" : "bad"}" title="${h}-session edge">${signed(s.all?.edge?.[k])} <span class="small muted">${h}d</span></td>`).join("")}
-          ${Array(Math.max(0, 3 - (s.horizons || []).length)).fill("<td></td>").join("")}
+          ${[0, 1, 2, 3].map((k) => { const h = s.horizons?.[k]; if (h == null) return "<td></td>"; const v = s.all?.netEdge?.[k] ?? s.all?.edge?.[k]; return `<td class="${(v ?? 0) >= 0 ? "good" : "bad"}">${signed(v)} <span class="small muted">${h}d</span></td>`; }).join("")}
           <td><button class="btn danger small" data-sdel="${esc(s.dir)}">Delete</button></td></tr>`).join("")}
       </tbody></table></div>` : '<div class="empty">No studies yet.</div>'}</div>`;
-  const keep = () => Object.assign(f, { from: $("#stFrom").value.trim(), to: $("#stTo").value.trim(), horizons: $("#stH").value.trim(), overrides: $("#stOver").value, name: $("#stName").value.trim() });
+  const keep = () => Object.assign(f, { from: $("#stFrom").value.trim(), to: $("#stTo").value.trim(), horizons: $("#stH").value.trim(), overrides: $("#stOver").value, name: $("#stName").value.trim(), cost: $("#stCost").value.trim() });
+  const current = () => ({ strategy: item.strategy, params: studyParams(item, f.overrides), horizons: f.horizons, name: f.name || (item.kind === "preset" ? item.name : "") });
   $("#stItem").onchange = (e) => { keep(); f.item = e.target.value; f.overrides = null; f.horizons = null; renderStudies(); };
   $("#stRefresh").onclick = () => { S.studies = null; renderStudies(); };
   root.querySelectorAll("[data-study]").forEach((a) => (a.onclick = () => { S.study = { dir: a.dataset.study }; renderStudies(); }));
   root.querySelectorAll("[data-sdel]").forEach((b) => (b.onclick = async () => { if (!confirm("Delete this study from disk?")) return; await api(`/api/studies?dir=${encodeURIComponent(b.dataset.sdel)}`, { method: "DELETE" }); S.studies = null; renderStudies(); }));
-  $("#stRun").onclick = () => {
-    keep();
-    const def = stratDef(item.strategy), params = {};
-    for (const line of f.overrides.split(/[\n;]+/).map((x) => x.trim()).filter(Boolean)) {
-      const i = line.indexOf("=");
-      if (i < 1) return toast(`"${line}" should look like key=value`, 6000);
-      const k = line.slice(0, i).trim();
-      if (!(k in def.defaults)) return toast(`${item.strategy} has no setting "${k}"`, 6000);
-      params[k] = coerce(line.slice(i + 1).trim(), def.defaults[k]);
-    }
-    startJob({ kind: "study", strategy: item.strategy, params, from: f.from, to: f.to, horizons: f.horizons, name: f.name || (item.kind === "preset" ? item.name : "") });
+  root.querySelectorAll("[data-brm]").forEach((b) => (b.onclick = () => { keep(); f.batch.splice(Number(b.dataset.brm), 1); renderStudies(); }));
+  $("#stAdd").onclick = () => { keep(); try { f.batch.push(current()); f.name = ""; renderStudies(); } catch (e) { toast(e.message, 6000); } };
+  $("#stRun").onclick = () => { keep(); try { startJob({ kind: "study", ...current(), from: f.from, to: f.to, cost: f.cost }); } catch (e) { toast(e.message, 6000); } };
+  if ($("#stClear")) $("#stClear").onclick = () => { keep(); f.batch = []; renderStudies(); };
+  if ($("#stRunBatch")) $("#stRunBatch").onclick = () => {
+    keep(); f.batchName = $("#stBName").value.trim();
+    startJob({ kind: "study-batch", name: f.batchName, from: f.from, to: f.to, cost: f.cost, studies: f.batch });
   };
 }
 async function renderStudy(root) {
   const s = S.study.data ?? (S.study.data = await api(`/api/studies/one?dir=${encodeURIComponent(S.study.dir)}`));
-  const H = s.horizons, cell = (x, edge) => `<td class="${edge ? (x == null ? "" : x >= 0 ? "good" : "bad") : ""}">${signed(x)}</td>`;
+  const H = s.horizons, hasNet = !!s.rows?.[0]?.net;
+  const cell = (x, edge) => `<td class="${edge ? (x == null ? "" : x >= 0 ? "good" : "bad") : ""}">${signed(x)}</td>`;
   const head = (lbl) => H.map((h) => `<th>${lbl} ${h}d</th>`).join("");
   const body = (fn) => s.rows.map((r) => `<tr class="${r.year === "All" ? "total" : ""}"><td class="l">${r.year === "All" ? "<b>All years</b>" : esc(r.year)}</td>${fn(r)}</tr>`).join("");
   root.innerHTML = `<div class="crumbs"><a id="stBack">Studies</a> › <b>${esc(s.name)}</b></div>
     <div class="card"><div class="row spread"><div><h2>${esc(s.name)}</h2>
-      <div class="small muted">${esc(s.strategy)} · ${esc(s.from)} → ${esc(s.to)} · ${Object.keys(s.params || {}).length ? esc(Object.entries(s.params).map(([k, v]) => `${k}=${v}`).join(", ")) : "default settings"}</div></div>
+      <div class="small muted">${esc(s.strategy)} · ${esc(s.from)} → ${esc(s.to)} · ${Object.keys(s.params || {}).length ? esc(Object.entries(s.params).map(([k, v]) => `${k}=${v}`).join(", ")) : "default settings"}${hasNet ? ` · cost ${pct(s.cost, 2)} per signal` : ""}</div></div>
       <button class="btn" id="stOpen">Open folder</button></div>
       <p class="small muted">Average return from the next day's open to the close of session N. <b>Signal</b>: every signal that day. <b>Universe</b>: every stock passing the
-        liquidity filter on the same signal days. <b>Edge</b> = signal − universe.</p>
-      <div class="tablewrap"><table class="study"><thead><tr><th class="l">Year</th><th>Signals</th><th>Signal days</th>${head("Signal")}${head("Universe")}${head("Edge")}</tr></thead>
-        <tbody>${body((r) => `<td>${num(r.signals, 0)}</td><td>${num(r.signalDays, 0)}</td>${r.sig.map((x) => cell(x)).join("")}${r.base.map((x) => cell(x)).join("")}${r.edge.map((x) => cell(x, true)).join("")}`)}</tbody></table></div>
+        liquidity filter on the same signal days. <b>Edge</b> = signal − universe.${hasNet ? ` <b>Cost-adjusted</b> = signal − ${pct(s.cost, 2)}; <b>Edge after cost</b> = cost-adjusted − universe.` : ""}</p>
+      <div class="tablewrap"><table class="study"><thead><tr><th class="l">Year</th><th>Signals</th><th>Signal days</th>${head("Signal")}${hasNet ? head("Cost-adj.") : ""}${head("Universe")}${head("Edge")}${hasNet ? head("Edge after cost") : ""}</tr></thead>
+        <tbody>${body((r) => `<td>${num(r.signals, 0)}</td><td>${num(r.signalDays, 0)}</td>${r.sig.map((x) => cell(x)).join("")}${hasNet ? r.net.map((x) => cell(x)).join("") : ""}${r.base.map((x) => cell(x)).join("")}${r.edge.map((x) => cell(x, true)).join("")}${hasNet ? r.netEdge.map((x) => cell(x, true)).join("") : ""}`)}</tbody></table></div>
     </div>
-    <div class="card"><h3>Share of positive returns</h3><div class="tablewrap"><table class="study"><thead><tr><th class="l">Year</th>${H.map((h) => `<th>Signal ${h}d</th>`).join("")}${H.map((h) => `<th>Universe ${h}d</th>`).join("")}</tr></thead>
-      <tbody>${body((r) => `${r.sigWin.map((x) => `<td>${pct(x, 0)}</td>`).join("")}${r.baseWin.map((x) => `<td>${pct(x, 0)}</td>`).join("")}`)}</tbody></table></div>
+    <div class="card"><h3>Share of positive returns</h3><div class="tablewrap"><table class="study"><thead><tr><th class="l">Year</th>${head("Signal")}${hasNet ? head("Cost-adj.") : ""}${head("Universe")}</tr></thead>
+      <tbody>${body((r) => `${r.sigWin.map((x) => `<td>${pct(x, 0)}</td>`).join("")}${hasNet ? r.netWin.map((x) => `<td>${pct(x, 0)}</td>`).join("") : ""}${r.baseWin.map((x) => `<td>${pct(x, 0)}</td>`).join("")}`)}</tbody></table></div>
       <p class="small muted">${num(s.noEntry?.signals, 0)} signals had no bar the next day and were left out. Every signal's returns are in signals.csv in the folder.</p></div>`;
   $("#stBack").onclick = () => { S.study = null; renderStudies(); };
   $("#stOpen").onclick = () => api("/api/open", { method: "POST", body: { path: s.path } });

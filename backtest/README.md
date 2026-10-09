@@ -171,8 +171,17 @@ SPY above its 200-day average; as backtests they buy every signal equal-weight a
 - `breakout`: close is the highest close of the last 50 sessions (today included), volume ≥ 1.5× the
   average of the 50 sessions before today, 50-day > 200-day average. Strongest volume surge first.
 - `rsi2`: Wilder 2-day RSI < 10 and close > 200-day average (study horizons 3, 5, 10, 15).
+- `rsi2_deep`: the same with RSI(2) < 5 (horizons 3, 5, 10, 15).
+- `rs_rsi2`: top 20% of the liquid universe by return from 126 to 21 sessions ago (ranked daily), RSI(2) < 10
+  and close > 200-day average (horizons 3, 5, 10, 15).
 - `rs_leaders`: top 10% of the liquid universe by return from 126 to 21 sessions ago, on the first
-  trading day of each week only.
+  trading day of each week only (horizons 10, 20, 40, 60).
+
+Every study also reports cost-adjusted returns: each signal's return minus a cost per signal (default
+0.20%, round-trip slippage; `--cost 0.20`), and the edge after cost over the universe. Several studies
+run as one job with **Add to batch → Run batch** in the app, or `bt study --spec studies.json`
+(`{"name", "from", "to", "cost": 0.002, "studies": [{"strategy", "params", "horizons", "name"}]}`),
+which also writes `<stamp>-<name>-summary.csv` (each study's all-years row, one line per horizon).
 
 ## Writing a strategy
 

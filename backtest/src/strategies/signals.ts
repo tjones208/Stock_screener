@@ -1,4 +1,5 @@
-// Signal definitions for signal studies (Studies tab): breakout, rsi2, rs_leaders. Each shares the
+// Signal definitions for signal studies (Studies tab): breakout, rsi2, rsi2_deep, rs_rsi2,
+// rs_leaders. Each shares the
 // pullback strategy's liquidity filter (close ≥ $10, 20-day average dollar volume ≥ $20M, common
 // stock) and a market filter (SPY close above its 200-day average), and enters at the next open.
 // As backtests they buy every signal equal-weight (max_positions slots) and sell after hold_days.
@@ -176,6 +177,13 @@ export const breakout = signalStrategy<Breakout>({
     .map((x) => x.r.ticker),
 });
 
+/** Return from `from_days` to `skip_days` sessions ago, per liquid name, and its percentile among them. */
+function relativeStrength<X extends { r: Row; t: Tape }>(liquid: X[], fromDays: number, skipDays: number) {
+  const scored = liquid.map((x) => ({ x, m: x.t.n > fromDays ? x.t.close(skipDays) / x.t.close(fromDays) - 1 : NaN })).filter((y) => Number.isFinite(y.m));
+  const sorted = scored.map((y) => y.m).sort((a, b) => a - b);
+  return scored.map((y) => ({ ...y, pct: pctRank(sorted, y.m) }));
+}
+
 type Rsi2 = Base & { rsi_max: number; trend_ma: number };
 export const rsi2 = signalStrategy<Rsi2>({
   name: "rsi2",
@@ -194,6 +202,44 @@ export const rsi2 = signalStrategy<Rsi2>({
     .map((x) => x.r.ticker),
 });
 
+export const rsi2Deep = signalStrategy<Rsi2>({
+  name: "rsi2_deep",
+  description: "Signal study: rsi2 with a deeper oversold level, 2-day RSI (Wilder) under 5, close above its 200-day average; SPY above its 200-day.",
+  defaults: { rsi_max: 5, trend_ma: 200, hold_days: 5 },
+  fields: [
+    { key: "rsi_max", label: "RSI(2) under", group: "Signal" },
+    { key: "trend_ma", label: "Close above MA (days)", group: "Signal" },
+  ],
+  studyHorizons: [3, 5, 10, 15],
+  bars: (p) => p.trend_ma,
+  smas: (p) => [p.trend_ma],
+  signals: (_ctx, liquid, p) => liquid
+    .filter(({ r, t, ma: [m] }) => t.rsi < p.rsi_max && r.c > m)
+    .sort((a, b) => a.t.rsi - b.t.rsi)
+    .map((x) => x.r.ticker),
+});
+
+type RsRsi2 = Rsi2 & { from_days: number; skip_days: number; top_pct: number };
+export const rsRsi2 = signalStrategy<RsRsi2>({
+  name: "rs_rsi2",
+  description: "Signal study: top 20% by return from 126 to 21 sessions ago (ranked daily among liquid stocks) AND 2-day RSI under 10 AND close above its 200-day; SPY above its 200-day.",
+  defaults: { from_days: 126, skip_days: 21, top_pct: 0.2, rsi_max: 10, trend_ma: 200, hold_days: 5 },
+  fields: [
+    { key: "from_days", label: "Return from (sessions ago)", group: "Signal" },
+    { key: "skip_days", label: "… to (sessions ago)", group: "Signal" },
+    { key: "top_pct", label: "Top fraction (0.2 = top 20%)", group: "Signal" },
+    { key: "rsi_max", label: "RSI(2) under", group: "Signal" },
+    { key: "trend_ma", label: "Close above MA (days)", group: "Signal" },
+  ],
+  studyHorizons: [3, 5, 10, 15],
+  bars: (p) => Math.max(p.trend_ma, p.from_days + 1),
+  smas: (p) => [p.trend_ma],
+  signals: (_ctx, liquid, p) => relativeStrength(liquid, p.from_days, p.skip_days)
+    .filter(({ x, pct }) => pct > 1 - p.top_pct && x.t.rsi < p.rsi_max && x.r.c > x.ma[0])
+    .sort((a, b) => a.x.t.rsi - b.x.t.rsi)
+    .map(({ x }) => x.r.ticker),
+});
+
 type RsLeaders = Base & { from_days: number; skip_days: number; top_pct: number };
 export const rsLeaders = signalStrategy<RsLeaders>({
   name: "rs_leaders",
@@ -204,14 +250,12 @@ export const rsLeaders = signalStrategy<RsLeaders>({
     { key: "skip_days", label: "… to (sessions ago)", group: "Signal" },
     { key: "top_pct", label: "Top fraction (0.1 = top 10%)", group: "Signal" },
   ],
+  studyHorizons: [10, 20, 40, 60],
   bars: (p) => p.from_days + 1,
   smas: () => [],
   signals: (ctx, liquid, p) => {
     // First trading day of the week: the previous session closed a week.
     if (ctx.i === 0 || !isWeekEnd(ctx.cal, ctx.days[ctx.i - 1])) return [];
-    const scored = liquid.map((x) => ({ t: x.r.ticker, m: x.t.n > p.from_days ? x.t.close(p.skip_days) / x.t.close(p.from_days) - 1 : NaN }))
-      .filter((x) => Number.isFinite(x.m));
-    const sorted = scored.map((x) => x.m).sort((a, b) => a - b);
-    return scored.filter((x) => pctRank(sorted, x.m) > 1 - p.top_pct).sort((a, b) => b.m - a.m).map((x) => x.t);
+    return relativeStrength(liquid, p.from_days, p.skip_days).filter((y) => y.pct > 1 - p.top_pct).sort((a, b) => b.m - a.m).map((y) => y.x.r.ticker);
   },
 });

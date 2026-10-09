@@ -5,8 +5,9 @@
 //
 // Return over N sessions = close of the Nth session counting the entry day ÷ the entry day's open − 1
 // (5 sessions: next open → close 4 sessions later; same counting as a 5-day time stop). Prices are
-// split-adjusted, dividends left out, no costs. A stock that stops trading uses its last close.
-// Layout: <results>/studies/<stamp>-<name>/ study.json, study.csv (the table), signals.csv.
+// split-adjusted, dividends left out. `cost` (default 0.20%) is subtracted from each signal's return
+// for the cost-adjusted columns (round-trip slippage); the universe has no cost. A stock that stops
+// trading uses its last close. Layout: <results>/studies/<stamp>-<name>/ study.json, study.csv, signals.csv.
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { isMonthEnd, isWeekEnd, type Calendar } from "../../lib/momentum/calendar.ts";
@@ -14,23 +15,26 @@ import type { Ctx, DataSource, StrategyDef } from "./engine/engine.ts";
 import { Portfolio } from "./engine/portfolio.ts";
 import type { Row } from "./engine/types.ts";
 
-export type StudySpec = { strategy: string; params?: Record<string, unknown>; from?: string; to?: string; horizons?: number[]; name?: string };
+export type StudySpec = { strategy: string; params?: Record<string, unknown>; from?: string; to?: string; horizons?: number[]; name?: string; cost?: number; batch?: string };
 
-type Acc = { n: number[]; sum: number[]; pos: number[] };
-const acc = (k: number): Acc => ({ n: Array(k).fill(0), sum: Array(k).fill(0), pos: Array(k).fill(0) });
+type Acc = { n: number[]; sum: number[]; pos: number[]; posNet: number[] };
+const acc = (k: number): Acc => ({ n: Array(k).fill(0), sum: Array(k).fill(0), pos: Array(k).fill(0), posNet: Array(k).fill(0) });
 type Item = { t: string; sig: boolean; year: string; d: string; entry: number; r: (number | null)[] };
 
 export type StudyRow = {
   year: string; signals: number; signalDays: number; baseline: number;
   sig: (number | null)[]; base: (number | null)[]; edge: (number | null)[]; sigWin: (number | null)[]; baseWin: (number | null)[];
+  /** Signal return minus the cost, and that minus the universe. */
+  net: (number | null)[]; netEdge: (number | null)[]; netWin: (number | null)[];
 };
 export type StudyResult = {
-  name: string; strategy: string; params: Record<string, unknown>; from: string; to: string; horizons: number[]; created: string;
+  name: string; strategy: string; params: Record<string, unknown>; from: string; to: string; horizons: number[]; created: string; cost: number; batch: string | null;
   rows: StudyRow[]; noEntry: { signals: number; baseline: number }; incomplete: number;
 };
 
 export async function runStudy(data: DataSource, def: StrategyDef, spec: StudySpec, onProgress?: (done: number, total: number) => void) {
-  const H = [...new Set((spec.horizons?.length ? spec.horizons : [5, 10, 15]).map((x) => Math.max(1, Math.round(x))))].sort((a, b) => a - b);
+  const cost = spec.cost ?? 0.002;
+  const H = [...new Set((spec.horizons?.length ? spec.horizons : def.studyHorizons ?? [5, 10, 15]).map((x) => Math.max(1, Math.round(x))))].sort((a, b) => a - b);
   const maxH = H.at(-1)!;
   const all = data.days();
   if (!all.length) throw new Error("The data set has no trading days");
@@ -88,7 +92,7 @@ export async function runStudy(data: DataSource, def: StrategyDef, spec: StudySp
       const r = (last.get(it.t) ?? it.entry) / it.entry - 1;
       it.r[h] = r;
       const g = group(it.year), a = it.sig ? g.sig : g.base;
-      a.n[h]++; a.sum[h] += r; if (r > 0) a.pos[h]++;
+      a.n[h]++; a.sum[h] += r; if (r > 0) a.pos[h]++; if (r - cost > 0) a.posNet[h]++;
     }
     exiting.delete(i);
 
@@ -118,21 +122,24 @@ export async function runStudy(data: DataSource, def: StrategyDef, spec: StudySp
   const rowOf = (year: string, gs: NonNullable<ReturnType<typeof groups.get>>[]): StudyRow => {
     const sum = (f: (x: (typeof gs)[number]) => Acc) => {
       const a = acc(H.length);
-      for (const x of gs) for (let k = 0; k < H.length; k++) { a.n[k] += f(x).n[k]; a.sum[k] += f(x).sum[k]; a.pos[k] += f(x).pos[k]; }
+      for (const x of gs) for (let k = 0; k < H.length; k++) { a.n[k] += f(x).n[k]; a.sum[k] += f(x).sum[k]; a.pos[k] += f(x).pos[k]; a.posNet[k] += f(x).posNet[k]; }
       return a;
     };
     const s = sum((x) => x.sig), b = sum((x) => x.base);
     const sig = H.map((_, k) => avg(s, k)), base = H.map((_, k) => avg(b, k));
+    const net = sig.map((x) => (x == null ? null : x - cost));
     return {
       year, signals: gs.reduce((a, x) => a + x.signals, 0), signalDays: gs.reduce((a, x) => a + x.days, 0), baseline: gs.reduce((a, x) => a + x.baseline, 0),
       sig, base, edge: H.map((_, k) => (sig[k] != null && base[k] != null ? sig[k]! - base[k]! : null)),
       sigWin: H.map((_, k) => win(s, k)), baseWin: H.map((_, k) => win(b, k)),
+      net, netEdge: H.map((_, k) => (net[k] != null && base[k] != null ? net[k]! - base[k]! : null)),
+      netWin: H.map((_, k) => (s.n[k] ? s.posNet[k] / s.n[k] : null)),
     };
   };
   const years = [...groups.keys()].sort();
   const result: StudyResult = {
     name: spec.name ?? `${def.name} signal study`, strategy: def.name, params: spec.params ?? {}, from: all[startIdx], to: all[endIdx], horizons: H,
-    created: new Date().toISOString(), rows: [...years.map((y) => rowOf(y, [groups.get(y)!])), rowOf("All", years.map((y) => groups.get(y)!))],
+    created: new Date().toISOString(), cost, batch: spec.batch ?? null, rows: [...years.map((y) => rowOf(y, [groups.get(y)!])), rowOf("All", years.map((y) => groups.get(y)!))],
     noEntry, incomplete,
   };
   return { result, signals: signalItems };
@@ -144,17 +151,31 @@ export function studyCsv(r: StudyResult) {
   const H = r.horizons;
   const head = ["year", "signals", "signal_days", "baseline_stock_days",
     ...H.map((h) => `signal_${h}d_pct`), ...H.map((h) => `baseline_${h}d_pct`), ...H.map((h) => `edge_${h}d_pct`),
-    ...H.map((h) => `signal_${h}d_win_pct`), ...H.map((h) => `baseline_${h}d_win_pct`)];
+    ...H.map((h) => `signal_${h}d_win_pct`), ...H.map((h) => `baseline_${h}d_win_pct`),
+    ...H.map((h) => `cost_adjusted_${h}d_pct`), ...H.map((h) => `edge_after_cost_${h}d_pct`), ...H.map((h) => `cost_adjusted_${h}d_win_pct`)];
   return [head.join(","), ...r.rows.map((x) => [x.year, x.signals, x.signalDays, x.baseline,
-    ...x.sig.map((v) => f(v, 3)), ...x.base.map((v) => f(v, 3)), ...x.edge.map((v) => f(v, 3)), ...x.sigWin.map((v) => f(v, 1)), ...x.baseWin.map((v) => f(v, 1))].join(","))].join("\n") + "\n";
+    ...x.sig.map((v) => f(v, 3)), ...x.base.map((v) => f(v, 3)), ...x.edge.map((v) => f(v, 3)), ...x.sigWin.map((v) => f(v, 1)), ...x.baseWin.map((v) => f(v, 1)),
+    ...x.net.map((v) => f(v, 3)), ...x.netEdge.map((v) => f(v, 3)), ...x.netWin.map((v) => f(v, 1))].join(","))].join("\n") + "\n";
+}
+
+/** One CSV for a batch: the all-years row of each study, one line per horizon. */
+export function batchSummaryCsv(items: { name: string; result: StudyResult }[]) {
+  const lines = ["study,strategy,horizon_days,signals,signal_days,signal_pct,cost_adjusted_pct,universe_pct,edge_pct,edge_after_cost_pct,signal_win_pct,cost_adjusted_win_pct,universe_win_pct"];
+  for (const { name, result: r } of items) {
+    const x = r.rows.at(-1)!;
+    r.horizons.forEach((h, k) => lines.push([JSON.stringify(name), r.strategy, h, x.signals, x.signalDays, f(x.sig[k], 3), f(x.net[k], 3), f(x.base[k], 3), f(x.edge[k], 3), f(x.netEdge[k], 3),
+      f(x.sigWin[k], 1), f(x.netWin[k], 1), f(x.baseWin[k], 1)].join(",")));
+  }
+  return lines.join("\n") + "\n";
 }
 
 /** Plain-text table for the console and the job log. */
 export function studyTable(r: StudyResult) {
   const H = r.horizons;
   const p = (x: number | null) => (x == null ? "—" : `${x >= 0 ? "+" : ""}${(x * 100).toFixed(2)}%`).padStart(8);
-  const head = `${"Year".padEnd(5)} ${"Signals".padStart(7)}  ${H.map((h) => `Sig ${h}d`.padStart(8)).join(" ")}  ${H.map((h) => `Base ${h}d`.padStart(8)).join(" ")}  ${H.map((h) => `Edge ${h}d`.padStart(8)).join(" ")}`;
-  return [head, ...r.rows.map((x) => `${x.year.padEnd(5)} ${String(x.signals).padStart(7)}  ${x.sig.map(p).join(" ")}  ${x.base.map(p).join(" ")}  ${x.edge.map(p).join(" ")}`)].join("\n");
+  const head = `${"Year".padEnd(5)} ${"Signals".padStart(7)}  ${H.map((h) => `Sig ${h}d`.padStart(8)).join(" ")}  ${H.map((h) => `Base ${h}d`.padStart(8)).join(" ")}  ${H.map((h) => `Edge ${h}d`.padStart(8)).join(" ")}  ${H.map((h) => `Net ${h}d`.padStart(8)).join(" ")}  ${H.map((h) => `NetEdge${h}`.padStart(9)).join(" ")}`;
+  return [head, ...r.rows.map((x) => `${x.year.padEnd(5)} ${String(x.signals).padStart(7)}  ${x.sig.map(p).join(" ")}  ${x.base.map(p).join(" ")}  ${x.edge.map(p).join(" ")}  ${x.net.map(p).join(" ")}  ${x.netEdge.map((v) => p(v).padStart(9)).join(" ")}`),
+    `Net = signal return minus ${(r.cost * 100).toFixed(2)}% cost; NetEdge = Net minus the universe.`].join("\n");
 }
 
 const slug = (s: string) => s.replace(/[^A-Za-z0-9_.=-]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 60) || "study";

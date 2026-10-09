@@ -247,6 +247,25 @@ export async function startServer(o: { port?: number; open?: boolean; host?: str
               ...(typeof b.where === "string" && b.where ? ["--where", b.where] : [])]);
             break;
           }
+          case "study-batch": {
+            const list = Array.isArray(b.studies) ? (b.studies as { strategy?: unknown; params?: unknown; horizons?: unknown; name?: unknown }[]) : [];
+            if (!list.length) throw new Error("Add at least one study to the batch.");
+            const date = (v: unknown) => (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v.trim()) ? v.trim() : undefined);
+            const studies = list.map((x) => {
+              const st = String(x.strategy ?? "");
+              if (!lib.strategies[st]) throw new Error(`Unknown strategy "${st}".`);
+              const horizons = String(x.horizons ?? "").split(",").map((h) => Math.round(Number(h))).filter((h) => h > 0 && h <= 260);
+              return { strategy: st, params: x.params && typeof x.params === "object" ? x.params : {}, horizons: horizons.length ? horizons : undefined, name: typeof x.name === "string" && x.name.trim() ? x.name.trim().slice(0, 60) : undefined };
+            });
+            const cost = Number(b.cost);
+            const spec = { name: typeof b.name === "string" && b.name.trim() ? b.name.trim().slice(0, 60) : "Study batch", from: date(b.from), to: date(b.to), cost: Number.isFinite(cost) && cost >= 0 ? cost / 100 : 0.002, studies };
+            const specs = join(f.results, ".specs");
+            mkdirSync(specs, { recursive: true });
+            const file = join(specs, `studies-${Date.now()}.json`);
+            writeFileSync(file, JSON.stringify(spec, null, 2));
+            job = queue.add("study", `Study batch: ${spec.name} (${studies.length})`, ["study", "--data", need(f.data, "prepared data"), "--spec", file, "--out", f.results]);
+            break;
+          }
           case "study": {
             const st = String(b.strategy ?? "");
             if (!lib.strategies[st]) throw new Error(`Unknown strategy "${st}".`);
@@ -257,6 +276,7 @@ export async function startServer(o: { port?: number; open?: boolean; host?: str
             const from = date(b.from), to = date(b.to), name = typeof b.name === "string" ? b.name.trim().slice(0, 80) : "";
             job = queue.add("study", `Signal study: ${name || st}`, ["study", "--data", need(f.data, "prepared data"), "--strategy", st, "--out", f.results,
               "--horizons", horizons.join(","), ...(from ? ["--from", from] : []), ...(to ? ["--to", to] : []), ...(name ? ["--name", name] : []),
+              ...(Number.isFinite(Number(b.cost)) && b.cost !== "" && b.cost != null ? ["--cost", String(Number(b.cost))] : []),
               ...Object.entries(params).flatMap(([k, v]) => ["--set", `${k}=${v}`])]);
             break;
           }
@@ -307,7 +327,7 @@ export async function startServer(o: { port?: number; open?: boolean; host?: str
         if (!existsSync(studies)) return send(res, 200, []);
         const list = readdirSync(studies).map((name) => ({ name, s: readJson<Record<string, unknown> | null>(join(studies, name, "study.json"), null) }))
           .filter((x) => x.s).map(({ name, s }) => ({ dir: name, name: s!.name, created: s!.created, strategy: s!.strategy, params: s!.params, from: s!.from, to: s!.to,
-            horizons: s!.horizons, all: (s!.rows as unknown[]).at(-1) }));
+            horizons: s!.horizons, cost: s!.cost ?? null, batch: s!.batch ?? null, all: (s!.rows as unknown[]).at(-1) }));
         return send(res, 200, list.sort((a, b) => String(b.created).localeCompare(String(a.created))));
       }
       const studyDir = () => {

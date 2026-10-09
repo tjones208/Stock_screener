@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type { StrategyDef } from "../src/engine/engine.ts";
 import { runBacktest } from "../src/engine/engine.ts";
 import { runStudy } from "../src/study.ts";
-import { breakout, rsi2, rsLeaders, Tape } from "../src/strategies/signals.ts";
+import { breakout, rsi2, rsi2Deep, rsLeaders, rsRsi2, Tape } from "../src/strategies/signals.ts";
 import { MemorySource, row, weekdays } from "./helpers.ts";
 
 test("Tape: Wilder RSI(2), means and highs", () => {
@@ -77,4 +77,23 @@ test("signal strategies run as backtests: equal weight, sold after hold_days", a
   const sells = r.fills.filter((f) => f.side === "sell" && f.tag === "time");
   assert.ok(sells.length >= 2);
   for (const c of r.closed) assert.equal(c.days >= 3 && c.days <= 5, true, `${c.entryD} → ${c.exitD}`);
+});
+
+test("rsi2_deep needs RSI(2) under 5; rs_rsi2 also needs the top 20% by 126→21-day return", async () => {
+  // X: a gentle uptrend with a mild 2-day dip (RSI between 5 and 10) on days 300–301 and a hard one on 320–321.
+  const dip = (i: number) => (i === 300 ? 0.5 : i === 301 ? 0.7 : i === 320 ? 2 : i === 321 ? 3 : 0); // RSI 6.25 on 301; 2.5 and 1.28 on 320–321
+  const src = market((i) => ({ c: 40 + i * 0.05 - dip(i) }));
+  const mild = await signalDays(rsi2 as unknown as StrategyDef, src);
+  const deep = await signalDays(rsi2Deep as unknown as StrategyDef, src);
+  assert.ok(deep.length > 0 && deep.every((d) => mild.includes(d)), "deep signals are a subset of rsi2");
+  assert.ok(deep.length < mild.length);
+  assert.deepEqual(rsi2Deep.studyHorizons, [3, 5, 10, 15]);
+  // Among SPY's peers only U and X are liquid stocks: X's 126→21 return (≈+0.13%/day) tops U's, so X is in the top 20%.
+  const rs = await signalDays(rsRsi2 as unknown as StrategyDef, src);
+  assert.deepEqual(rs, mild);
+  // Make X the laggard: no rs_rsi2 signals at all.
+  const lag = market((i) => ({ c: 80 - i * 0.01 + (i > 250 ? (i - 250) * 0.06 : 0) - dip(i) }));
+  assert.ok((await signalDays(rsi2 as unknown as StrategyDef, lag)).length > 0);
+  assert.deepEqual(await signalDays(rsRsi2 as unknown as StrategyDef, lag), []);
+  assert.deepEqual(rsLeaders.studyHorizons, [10, 20, 40, 60]);
 });

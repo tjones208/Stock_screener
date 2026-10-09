@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { StrategyDef } from "../src/engine/engine.ts";
-import { runStudy, studyCsv, studyTable } from "../src/study.ts";
+import { batchSummaryCsv, runStudy, studyCsv, studyTable } from "../src/study.ts";
 import { pullback } from "../src/strategies/pullback.ts";
 import { MemorySource, row, weekdays } from "./helpers.ts";
 
@@ -42,6 +42,15 @@ test("study: forward returns from the next open to the Nth close, baseline on si
   assert.equal(all.sigWin[0], 1);
   assert.ok(seen.includes(days[3]) && !seen.includes(days[4])); // the strategy only runs through `to`
   assert.match(studyTable(r), /All\s+1\s+\+0\.98%/);
+  // Cost: 0.20% off each signal return (default); the universe is untouched.
+  assert.equal(r.cost, 0.002);
+  assert.ok(Math.abs(all.net[2]! - (s5! - 0.002)) < 1e-12 && Math.abs(all.netEdge[2]! - (s5! - 0.002 - base5)) < 1e-12);
+  assert.match(studyCsv(r).split("\n")[0], /cost_adjusted_1d_pct,cost_adjusted_3d_pct,cost_adjusted_5d_pct,edge_after_cost_1d_pct/);
+  const { result: r2 } = await runStudy(new MemorySource(rows), def, { strategy: "t", from: days[0], to: days[3], horizons: [1], cost: 0.01 });
+  assert.equal(r2.rows.at(-1)!.netWin[0], 0); // 103/102 − 1 = 0.98% < 1% cost
+  const sum = batchSummaryCsv([{ name: "a, b", result: r }, { name: "c", result: r2 }]).trim().split("\n");
+  assert.equal(sum.length, 1 + 3 + 1);
+  assert.match(sum[1], /^"a, b",t,1,1,1,/);
   assert.match(studyCsv(r).split("\n")[0], /^year,signals,signal_days,baseline_stock_days,signal_1d_pct/);
 });
 
