@@ -198,9 +198,13 @@ function edit(item) {
   if (!S.edits[item.id]) S.edits[item.id] = { params: { ...item.params }, sweep: { ...item.sweep } };
   return S.edits[item.id];
 }
+// "null" / "none" (or blank, for a setting that is off by default) switch an optional number off.
 function coerce(v, like) {
   if (typeof like === "boolean") return v === true || v === "true" || v === "on";
-  if (typeof like === "number") { const n = Number(v); return Number.isFinite(n) ? n : like; }
+  const s = String(v ?? "").trim();
+  if (s === "null" || s === "none") return null;
+  if (typeof like === "number") { const n = Number(s); return s !== "" && Number.isFinite(n) ? n : like; }
+  if (like === null) { const n = Number(s); return s === "" ? null : Number.isFinite(n) ? n : s; }
   return v;
 }
 function sweepValues(raw, like) {
@@ -259,6 +263,16 @@ function renderStrategies() {
           ${s.data.ready ? "" : '<p class="small warn">Prepare data first (Data tab), or try the demo data.</p>'}
           ${allRuns.length > 200 ? '<p class="small warn">That is a lot of runs; each one takes from seconds to minutes depending on the period.</p>' : ""}
         </div>
+        <div class="card">
+          <h3>Saved batches</h3>
+          <p class="small muted">Batch files in <code style="word-break:break-all">${esc(s.batchFolder || "")}</code> keep their own period, capital, slippage and benchmarks.</p>
+          ${(s.batches || []).length ? `<div class="tablewrap"><table><thead><tr><th class="l">Batch</th><th>Period</th><th>Capital</th><th>Slippage</th><th class="l">Runs</th><th></th></tr></thead><tbody>
+            ${s.batches.map((b) => b.error ? `<tr><td class="l">${esc(b.file)}</td><td colspan="5" class="l bad">${esc(b.error)}</td></tr>`
+              : `<tr><td class="l"><b>${esc(b.name)}</b><div class="small muted">${esc(b.file)}</div></td><td>${esc(b.from || "start")} → ${esc(b.to || "end")}</td>
+                <td>${money(b.capital)}</td><td>${b.slippageBps ?? "—"} bps</td><td class="l small">${b.runs.map(esc).join("<br>")}</td>
+                <td><button class="btn primary small" data-sbatch="${esc(b.file)}" ${s.data.ready ? "" : "disabled"}>Run</button></td></tr>`).join("")}
+          </tbody></table></div>` : '<div class="small muted">No batch files yet.</div>'}
+        </div>
       </div>
     </div>`;
   root.querySelectorAll(".lib .item").forEach((el) => el.addEventListener("click", (ev) => {
@@ -267,6 +281,7 @@ function renderStrategies() {
   }));
   $("#reload").onclick = async () => { const r2 = await api("/api/strategies/reload", { method: "POST" }); toast(`${r2.count} strategies loaded${r2.errors.length ? `, ${r2.errors.length} with errors` : ""}`); refresh(); };
   if (sel) bindEditor(sel);
+  root.querySelectorAll("[data-sbatch]").forEach((b) => (b.onclick = () => startJob({ kind: "saved-batch", file: b.dataset.sbatch })));
   $("#start").onclick = async () => {
     const [st, lt] = $("#rTax").value.split(",").map(Number);
     const run = { from: $("#rFrom").value.trim(), to: $("#rTo").value.trim(), capital: Number($("#rCap").value), slippageBps: Number($("#rSlip").value), commission: Number($("#rCom").value), taxSt: st, taxLt: lt, bench: $("#rBench").value.trim() };
@@ -299,10 +314,10 @@ function editorHtml(item) {
   const groups = {};
   for (const f of fieldsOf(def)) (groups[f.group || "Parameters"] ||= []).push(f);
   const input = (f) => {
-    const dflt = def.defaults[f.key], v = e.params[f.key] ?? dflt, changed = e.params[f.key] !== undefined && e.params[f.key] !== dflt;
+    const dflt = def.defaults[f.key], v = f.key in e.params ? e.params[f.key] : dflt, changed = e.params[f.key] !== undefined && e.params[f.key] !== dflt;
     const ctl = typeof dflt === "boolean" ? `<input type="checkbox" data-p="${f.key}" ${v ? "checked" : ""}/>`
       : f.choices ? `<select data-p="${f.key}">${f.choices.map((c) => `<option ${c === v ? "selected" : ""}>${esc(c)}</option>`).join("")}</select>`
-      : `<input data-p="${f.key}" value="${esc(v)}" />`;
+      : `<input data-p="${f.key}" value="${v == null ? "" : esc(v)}" ${v == null ? 'placeholder="none"' : ""} title="${esc(f.help || "")}" />`;
     const showSweep = S.showSweep || e.sweep[f.key];
     return `<div class="param ${changed ? "changed" : ""}"><span class="lbl" title="${esc(f.key)}">${esc(f.label)}</span>${ctl}
       ${showSweep ? `<input class="sweep" data-s="${f.key}" value="${esc(e.sweep[f.key] || "")}" placeholder="values to test, e.g. ${typeof (e.params[f.key] ?? def.defaults[f.key]) === "number" ? "8,13,20" : "a,b"}" />` : ""}</div>`;

@@ -173,7 +173,11 @@ SPY above its 200-day average; as backtests they buy every signal equal-weight a
 - `rsi2`: Wilder 2-day RSI < 10 and close > 200-day average (study horizons 3, 5, 10, 15).
 - `rsi2_deep`: the same with RSI(2) < 5 (horizons 3, 5, 10, 15).
 - `rs_rsi2`: top 20% of the liquid universe by return from 126 to 21 sessions ago (ranked daily), RSI(2) < 10
-  and close > 200-day average (horizons 3, 5, 10, 15).
+  and close > 200-day average (horizons 3, 5, 10, 15). Also a full backtest strategy: entries at the next open
+  sized to risk `risk_per_trade` (0.75%) over a `stop_atr` × 14-day ATR stop (3; `null` = no stop, sized as
+  if 3 × ATR), capped by `max_position_pct` (20%), `max_positions` (8) and `max_portfolio_heat` (4.5%); the
+  stop is worked intraday, a target only with `reward_risk`, a time exit after `max_hold_days` (20). With
+  more signals than slots, `rank_by` picks: `rs` (strongest first) or `rsi2` (most oversold first).
 - `rs_leaders`: top 10% of the liquid universe by return from 126 to 21 sessions ago, on the first
   trading day of each week only (horizons 10, 20, 40, 60).
 
@@ -182,6 +186,13 @@ Every study also reports cost-adjusted returns: each signal's return minus a cos
 run as one job with **Add to batch → Run batch** in the app, or `bt study --spec studies.json`
 (`{"name", "from", "to", "cost": 0.002, "studies": [{"strategy", "params", "horizons", "name"}]}`),
 which also writes `<stamp>-<name>-summary.csv` (each study's all-years row, one line per horizon).
+
+### Saved batches
+
+JSON files in `backtest/batches/` (e.g. `rs_rsi2.json`: the rs_rsi2 variants, 2005–2018, $125,000,
+10 bps, SPY) appear on the Strategies tab with a Run button, or run `bt batch --data … --spec
+batches/rs_rsi2.json`. A named batch also writes `batch-<name>.json` and `batch-<name>.csv`. A setting
+can be switched off with `null` (in JSON, `--set stop_atr=null`, or typed into the app).
 
 ## Writing a strategy
 

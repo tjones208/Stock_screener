@@ -47,8 +47,10 @@ export function grid(g: Record<string, unknown[]>): Record<string, unknown>[] {
 }
 
 export function sweepCsv(rows: { params: Record<string, unknown>; stats: Stats }[]) {
+  // Every run's parameters get a column (runs can set different ones), then the stats.
+  const keys = [...new Set(rows.flatMap((r) => Object.keys(r.params)))];
   return csv(rows.map((r) => ({
-    ...r.params, cagr: r.stats.cagr, after_tax_cagr: r.stats.afterTaxCagr, max_drawdown: r.stats.maxDrawdown, sharpe: r.stats.sharpe,
+    ...Object.fromEntries(keys.map((k) => [k, k in r.params ? (r.params[k] === null ? "null" : r.params[k]) : ""])), cagr: r.stats.cagr, after_tax_cagr: r.stats.afterTaxCagr, max_drawdown: r.stats.maxDrawdown, sharpe: r.stats.sharpe,
     sortino: r.stats.sortino, volatility: r.stats.volatility, calmar: r.stats.calmar, trades: r.stats.trades, win_rate: r.stats.winRate,
     turnover: r.stats.turnover, exposure: r.stats.exposure, end_value: r.stats.endValue,
   })));

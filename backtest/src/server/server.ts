@@ -106,6 +106,19 @@ function folderInfo(p: string) {
   return { exists: true, isDir: true, backtests, csvFiles: csv.length, firstDay: csv[0]?.d ?? null, lastDay: csv.at(-1)?.d ?? null, gb: +(csv.reduce((a, f) => a + f.size, 0) / 1e9).toFixed(2), parquetFiles: parquet, refFiles: ref, prepared: existsSync(join(p, "calendar.parquet")) };
 }
 
+/** Saved batch specs: backtest/batches/*.json ({name, from, to, capital, slippageBps, bench, runs}). */
+const BATCHES = join(BT_ROOT, "batches");
+function savedBatches() {
+  if (!existsSync(BATCHES)) return [];
+  return readdirSync(BATCHES).filter((f) => f.endsWith(".json")).sort().map((file) => {
+    const b = readJson<{ name?: string; from?: string; to?: string; capital?: number; slippageBps?: number; bench?: string[]; runs?: { label?: string; strategy: string }[] } | null>(join(BATCHES, file), null);
+    return b && Array.isArray(b.runs)
+      ? { file, name: b.name ?? file.replace(/\.json$/, ""), from: b.from ?? null, to: b.to ?? null, capital: b.capital ?? null, slippageBps: b.slippageBps ?? null, bench: b.bench ?? [],
+          runs: b.runs.map((r) => r.label ?? r.strategy) }
+      : { file, error: "Not a batch file (needs a runs list)." };
+  });
+}
+
 /** Results folder → batches (newest first). */
 function listResults(root: string) {
   if (!existsSync(root)) return [];
@@ -171,7 +184,7 @@ export async function startServer(o: { port?: number; open?: boolean; host?: str
           settings, presets: readJson<Preset[]>(PRESETS, []), keySet: !!process.env.MASSIVE_API_KEY, node: process.version, platform: process.platform,
           strategies: Object.values(lib.strategies).map((s) => ({ name: s.name, description: s.description, defaults: s.defaults, fields: s.fields ?? null, studyHorizons: s.studyHorizons ?? null, source: lib.sources[s.name] ?? "?" })),
           strategyErrors: lib.errors, data: await dataStatus(settings.folders.data), jobs: queue.jobs.map((j) => ({ ...j, log: j.log.slice(-200) })),
-          strategyFolder: join(BT_ROOT, "strategies"),
+          strategyFolder: join(BT_ROOT, "strategies"), batches: savedBatches(), batchFolder: BATCHES,
         });
       }
       if (p === "/api/settings" && req.method === "POST") {
@@ -245,6 +258,12 @@ export async function startServer(o: { port?: number; open?: boolean; host?: str
             writeFileSync(file, JSON.stringify(spec, null, 2));
             job = queue.add("batch", String(spec.name || `${spec.runs.length} run${spec.runs.length === 1 ? "" : "s"}`), ["batch", "--data", need(f.data, "prepared data"), "--spec", file, "--out", f.results,
               ...(typeof b.where === "string" && b.where ? ["--where", b.where] : [])]);
+            break;
+          }
+          case "saved-batch": {
+            const sb = savedBatches().find((x) => x.file === b.file && !("error" in x));
+            if (!sb || "error" in sb) throw new Error("That batch file isn't in the batches folder.");
+            job = queue.add("batch", `${sb.name} (${sb.runs.length} runs)`, ["batch", "--data", need(f.data, "prepared data"), "--spec", join(BATCHES, sb.file), "--out", f.results]);
             break;
           }
           case "study-batch": {

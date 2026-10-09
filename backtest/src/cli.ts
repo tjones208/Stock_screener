@@ -32,7 +32,7 @@ const HELP = `bt — backtests on Massive flat files with the app's strategy rul
   Add --events to print progress as JSON lines (used by the app).
 `;
 
-const coerce = (v: string): unknown => (v === "true" ? true : v === "false" ? false : v !== "" && Number.isFinite(Number(v)) ? Number(v) : v);
+const coerce = (v: string): unknown => (v === "true" ? true : v === "false" ? false : v === "null" || v === "none" ? null : v !== "" && Number.isFinite(Number(v)) ? Number(v) : v);
 const kv = (list: string[] | undefined, split = false) => Object.fromEntries((list ?? []).map((s) => {
   const i = s.indexOf("=");
   if (i < 0) throw new Error(`Expected key=value, got "${s}"`);

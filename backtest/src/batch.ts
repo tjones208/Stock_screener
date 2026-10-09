@@ -69,8 +69,12 @@ export async function runBatch(data: DataSource, spec: BatchSpec, resultsDir: st
     rows.push({ folder, label, strategy: r.strategy, params: r.params ?? {}, stats: res.stats });
     emit({ type: "result", run: k + 1, label, dir: join(dir, folder), stats: res.stats });
   }
-  writeFileSync(join(dir, "batch.json"), JSON.stringify({ name: spec.name ?? null, created: new Date().toISOString(), spec: { ...spec, from, to }, benchmarks: bench, runs: rows }, null, 2));
-  writeFileSync(join(dir, "batch.csv"), sweepCsv(rows.map((x) => ({ params: { label: x.label, strategy: x.strategy, ...x.params }, stats: x.stats }))));
+  const json = JSON.stringify({ name: spec.name ?? null, created: new Date().toISOString(), spec: { ...spec, from, to }, benchmarks: bench, runs: rows }, null, 2);
+  const csv = sweepCsv(rows.map((x) => ({ params: { label: x.label, strategy: x.strategy, ...x.params }, stats: x.stats })));
+  writeFileSync(join(dir, "batch.json"), json);
+  writeFileSync(join(dir, "batch.csv"), csv);
+  // A named batch also gets batch-<name>.json / .csv, easy to find and share.
+  if (spec.name) { writeFileSync(join(dir, `batch-${slug(spec.name)}.json`), json); writeFileSync(join(dir, `batch-${slug(spec.name)}.csv`), csv); }
   emit({ type: "done", dir });
   return { dir, rows, bench };
 }

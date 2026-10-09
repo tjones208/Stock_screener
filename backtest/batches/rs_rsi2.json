@@ -1,0 +1,16 @@
+{
+  "name": "rs_rsi2",
+  "from": "2005-01-01",
+  "to": "2018-12-31",
+  "capital": 125000,
+  "slippageBps": 10,
+  "commission": 0,
+  "bench": ["SPY"],
+  "runs": [
+    { "strategy": "rs_rsi2", "label": "defaults" },
+    { "strategy": "rs_rsi2", "label": "max_hold_days=10", "params": { "max_hold_days": 10 } },
+    { "strategy": "rs_rsi2", "label": "max_hold_days=40", "params": { "max_hold_days": 40 } },
+    { "strategy": "rs_rsi2", "label": "stop_atr=null (time exit only)", "params": { "stop_atr": null } },
+    { "strategy": "rs_rsi2", "label": "rank_by=rsi2", "params": { "rank_by": "rsi2" } }
+  ]
+}

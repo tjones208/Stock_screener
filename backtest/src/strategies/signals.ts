@@ -1,24 +1,23 @@
-// Signal definitions for signal studies (Studies tab): breakout, rsi2, rsi2_deep, rs_rsi2,
-// rs_leaders. Each shares the
-// pullback strategy's liquidity filter (close ≥ $10, 20-day average dollar volume ≥ $20M, common
-// stock) and a market filter (SPY close above its 200-day average), and enters at the next open.
-// As backtests they buy every signal equal-weight (max_positions slots) and sell after hold_days.
+// Signal definitions for signal studies (Studies tab) and backtests: breakout, rsi2, rsi2_deep,
+// rs_leaders (simple: every signal equal-weight, sold after hold_days) and rs_rsi2 (risk-sized with
+// an ATR stop and a time exit). All share the pullback strategy's liquidity filter (close ≥ $10,
+// 20-day average dollar volume ≥ $20M, common stock) and a market filter (SPY close above its
+// 200-day average), and enter at the next open. A signal study counts every buy a strategy asks
+// for with an empty portfolio, so the study and the backtest use the same entry rule.
 import { isWeekEnd } from "../../../lib/momentum/calendar.ts";
 import { pctRank } from "../../../lib/pullback/core.ts";
 import type { Ctx, ParamField, StrategyDef } from "../engine/engine.ts";
 import type { Order, Row } from "../engine/types.ts";
 
-type Base = {
+type Filters = {
   min_price: number; min_avg_dollar_vol: number; dollar_vol_lookback: number; common_only: boolean;
   use_market_filter: boolean; market_ticker: string; market_ma: number;
-  max_positions: number; hold_days: number;
 };
-const BASE: Base = {
+const FILTERS: Filters = {
   min_price: 10, min_avg_dollar_vol: 20_000_000, dollar_vol_lookback: 20, common_only: true,
   use_market_filter: true, market_ticker: "SPY", market_ma: 200,
-  max_positions: 10, hold_days: 10,
 };
-const BASE_FIELDS: ParamField[] = [
+const FILTER_FIELDS: ParamField[] = [
   { key: "min_price", label: "Min price ($)", group: "Universe" },
   { key: "min_avg_dollar_vol", label: "Min average dollar volume ($)", group: "Universe" },
   { key: "dollar_vol_lookback", label: "Dollar-volume average (days)", group: "Universe" },
@@ -26,30 +25,40 @@ const BASE_FIELDS: ParamField[] = [
   { key: "use_market_filter", label: "Only signal when the market is above its average", group: "Market regime" },
   { key: "market_ticker", label: "Market ticker", group: "Market regime" },
   { key: "market_ma", label: "Market average (days)", group: "Market regime" },
+];
+type Base = Filters & { max_positions: number; hold_days: number };
+const BASE: Base = { ...FILTERS, max_positions: 10, hold_days: 10 };
+const BASE_FIELDS: ParamField[] = [
+  ...FILTER_FIELDS,
   { key: "max_positions", label: "Backtest: positions (equal weight)", group: "Backtest" },
   { key: "hold_days", label: "Backtest: sell after (sessions)", group: "Backtest" },
 ];
 
-/** Per-ticker history: closes, volumes and dollar volumes in ring buffers, plus Wilder RSI state. */
+/** Per-ticker history: closes, volumes, dollar volumes and true ranges in ring buffers, plus Wilder RSI state. */
 export class Tape {
   n = 0;
   private head = -1;
   private N: number;
-  private c: Float64Array; private v: Float64Array; private dv: Float64Array;
+  private c: Float64Array; private v: Float64Array; private dv: Float64Array; private tr: Float64Array;
   private rsiLen: number; private gain = 0; private loss = 0; private seen = 0;
   rsi = NaN;
   constructor(N: number, rsiLen = 2) {
     this.N = N; this.rsiLen = rsiLen;
-    this.c = new Float64Array(N); this.v = new Float64Array(N); this.dv = new Float64Array(N);
+    this.c = new Float64Array(N); this.v = new Float64Array(N); this.dv = new Float64Array(N); this.tr = new Float64Array(N);
   }
   private at = (a: Float64Array, k: number) => a[(this.head - k + this.N * 2) % this.N];
   close(k = 0) { return this.at(this.c, k); }
-  push(r: { c: number; v: number; dv: number }) {
-    if (this.n > 0) this.wilder(r.c - this.close());
+  push(r: { c: number; v: number; dv: number; h?: number; l?: number }) {
+    const pc = this.n > 0 ? this.close() : NaN;
+    if (this.n > 0) this.wilder(r.c - pc);
+    const h = r.h ?? r.c, l = r.l ?? r.c;
     this.head = (this.head + 1) % this.N;
     this.n++;
     this.c[this.head] = r.c; this.v[this.head] = r.v; this.dv[this.head] = r.dv;
+    this.tr[this.head] = Number.isFinite(pc) ? Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc)) : h - l;
   }
+  /** Simple average of the true range over `len` bars (as in the pullback rules). */
+  atr(len: number) { return this.mean("tr", len); }
   /** Wilder's RSI: the first average is the simple mean of `rsiLen` changes, then (prev × (n − 1) + x) / n. */
   private wilder(ch: number) {
     const L = this.rsiLen, g = Math.max(ch, 0), l = Math.max(-ch, 0);
@@ -59,7 +68,7 @@ export class Tape {
     this.rsi = this.loss === 0 ? (this.gain === 0 ? 50 : 100) : 100 - 100 / (1 + this.gain / this.loss);
   }
   /** Mean over k = skip … skip + len − 1 bars ago (NaN without enough history). */
-  mean(a: "c" | "v" | "dv", len: number, skip = 0) {
+  mean(a: "c" | "v" | "dv" | "tr", len: number, skip = 0) {
     if (this.n < len + skip) return NaN;
     const arr = this[a];
     let s = 0;
@@ -90,44 +99,70 @@ class Sma {
   }
 }
 
-type Spec<P extends Base> = {
-  name: string; description: string; defaults: Omit<P, keyof Base> & Partial<Base>; fields: ParamField[];
+type Liquid = { r: Row; t: Tape; ma: number[] };
+type Spec<P extends Filters> = {
+  name: string; description: string; defaults: Partial<P>; fields: ParamField[];
   studyHorizons?: number[];
   /** History bars and the moving-average windows the rule needs. */
   bars: (p: P) => number;
   smas: (p: P) => number[];
-  /** Today's signals among the liquid names, strongest first. `ma[t]` holds this ticker's averages in `smas` order. */
-  signals: (ctx: Ctx, liquid: { r: Row; t: Tape; ma: number[] }[], p: P) => string[];
+  /** Today's signals among the liquid names, in the order to buy them. `ma` holds the ticker's averages in `smas` order. */
+  signals: (ctx: Ctx, liquid: Liquid[], p: P) => string[];
 };
 
+/** Per-ticker histories, today's liquid universe and the market filter, shared by both executors. */
+function scanner<P extends Filters>(spec: Spec<P>, p: P, extraBars = 0) {
+  const N = Math.max(spec.bars(p), p.market_ma, p.dollar_vol_lookback, extraBars) + 2;
+  const lens = [...new Set([...spec.smas(p), p.market_ma])];
+  const nSma = spec.smas(p).length;
+  const tapes = new Map<string, { t: Tape; sma: Sma; ma: number[] }>();
+  let liquidToday: string[] = [];
+  return {
+    tapes,
+    universe: () => liquidToday,
+    /** Feed today's bars; returns the liquid names and whether the market filter allows entries. */
+    update(ctx: Ctx) {
+      for (const r of ctx.today.values()) {
+        let x = tapes.get(r.ticker);
+        if (!x) tapes.set(r.ticker, (x = { t: new Tape(N), sma: new Sma(lens), ma: [] }));
+        x.t.push(r);
+        x.ma = x.sma.push(x.t);
+      }
+      const liquid: Liquid[] = [];
+      for (const r of ctx.today.values()) {
+        if (r.ticker === p.market_ticker || r.c < p.min_price) continue;
+        if (p.common_only) { const type = ctx.tickers.get(r.ticker)?.type; if (type && type !== "CS") continue; }
+        const x = tapes.get(r.ticker)!;
+        if (!(x.t.mean("dv", p.dollar_vol_lookback) >= p.min_avg_dollar_vol)) continue;
+        liquid.push({ r, t: x.t, ma: x.ma.slice(0, nSma) });
+      }
+      liquidToday = liquid.map((x) => x.r.ticker);
+      let riskOn = true;
+      if (p.use_market_filter) {
+        const m = tapes.get(p.market_ticker), mr = ctx.row(p.market_ticker);
+        const ma = m?.ma[lens.indexOf(p.market_ma)];
+        if (m && (!mr || !(mr.c > (ma ?? NaN)))) riskOn = false;
+      }
+      return { liquid, riskOn };
+    },
+  };
+}
+
+const warmupOf = <P extends Filters>(spec: Spec<P>, extra: (p: P) => number = () => 0) =>
+  (p: P) => Math.ceil(Math.max(spec.bars(p), p.market_ma, p.dollar_vol_lookback, extra(p)) * 1.1) + 10;
+
+/** Simple executor: buy every signal equal-weight in `max_positions` slots, sell after `hold_days`. */
 function signalStrategy<P extends Base>(spec: Spec<P>): StrategyDef<P> {
   const defaults = { ...BASE, ...spec.defaults } as P;
   return {
     name: spec.name, description: spec.description, defaults, fields: [...spec.fields, ...BASE_FIELDS], studyHorizons: spec.studyHorizons,
-    warmupDays: (p) => Math.ceil(Math.max(spec.bars(p), p.market_ma, p.dollar_vol_lookback) * 1.1) + 10,
+    warmupDays: warmupOf(spec),
     create(p) {
-      const N = Math.max(spec.bars(p), p.market_ma, p.dollar_vol_lookback) + 2;
-      const lens = [...new Set([...spec.smas(p), p.market_ma])];
-      const tapes = new Map<string, { t: Tape; sma: Sma; ma: number[] }>();
-      const held = new Map<string, number>(); // ticker → sessions held (backtests)
-      let liquidToday: string[] = [];
+      const sc = scanner(spec, p);
+      const held = new Map<string, number>(); // ticker → sessions held
       return {
         onClose(ctx) {
-          for (const r of ctx.today.values()) {
-            let x = tapes.get(r.ticker);
-            if (!x) tapes.set(r.ticker, (x = { t: new Tape(N), sma: new Sma(lens), ma: [] }));
-            x.t.push(r);
-            x.ma = x.sma.push(x.t);
-          }
-          const liquid: { r: Row; t: Tape; ma: number[] }[] = [];
-          for (const r of ctx.today.values()) {
-            if (r.ticker === p.market_ticker || r.c < p.min_price) continue;
-            if (p.common_only) { const type = ctx.tickers.get(r.ticker)?.type; if (type && type !== "CS") continue; }
-            const x = tapes.get(r.ticker)!;
-            if (!(x.t.mean("dv", p.dollar_vol_lookback) >= p.min_avg_dollar_vol)) continue;
-            liquid.push({ r, t: x.t, ma: x.ma.slice(0, spec.smas(p).length) });
-          }
-          liquidToday = liquid.map((x) => x.r.ticker);
+          const { liquid, riskOn } = sc.update(ctx);
           if (!ctx.trading) return [];
           const orders: Order[] = [];
           for (const [t, n] of held) {
@@ -135,11 +170,7 @@ function signalStrategy<P extends Base>(spec: Spec<P>): StrategyDef<P> {
             held.set(t, n + 1);
             if (n + 1 >= p.hold_days) orders.push({ side: "sell", ticker: t, shares: "all", tag: "time" });
           }
-          if (p.use_market_filter) {
-            const m = tapes.get(p.market_ticker), mr = ctx.row(p.market_ticker);
-            const ma = m?.ma[lens.indexOf(p.market_ma)];
-            if (m && (!mr || !(mr.c > (ma ?? NaN)))) return orders;
-          }
+          if (!riskOn) return orders;
           const size = ctx.equity / p.max_positions;
           for (const t of spec.signals(ctx, liquid, p)) {
             if (held.has(t) || ctx.portfolio.sharesOf(t) > 0) continue;
@@ -147,10 +178,104 @@ function signalStrategy<P extends Base>(spec: Spec<P>): StrategyDef<P> {
           }
           return orders;
         },
-        universe: () => liquidToday,
+        universe: sc.universe,
         onFill(f, ctx) {
           if (f.side === "buy") held.set(f.ticker, 0);
           else if (ctx.portfolio.sharesOf(f.ticker) <= 0) held.delete(f.ticker);
+        },
+      };
+    },
+  };
+}
+
+type Risk = Filters & {
+  max_hold_days: number; stop_atr: number | null; atr_period: number; reward_risk: number | null;
+  risk_per_trade: number; max_position_pct: number; max_positions: number; max_portfolio_heat: number;
+};
+const RISK: Risk = {
+  ...FILTERS, max_hold_days: 20, stop_atr: 3, atr_period: 14, reward_risk: null,
+  risk_per_trade: 0.0075, max_position_pct: 0.2, max_positions: 8, max_portfolio_heat: 0.045,
+};
+const RISK_FIELDS: ParamField[] = [
+  ...FILTER_FIELDS,
+  { key: "max_hold_days", label: "Time exit after (sessions)", group: "Exits" },
+  { key: "stop_atr", label: "Stop: entry − × ATR (null = no stop)", group: "Exits", help: "Without a stop, positions are still sized as if the stop were 3 × ATR away." },
+  { key: "atr_period", label: "ATR period (days)", group: "Exits" },
+  { key: "reward_risk", label: "Target: R multiple of the stop distance (null = none)", group: "Exits" },
+  { key: "risk_per_trade", label: "Risk per trade (fraction of equity)", group: "Risk & sizing" },
+  { key: "max_position_pct", label: "Max position (fraction of equity)", group: "Risk & sizing" },
+  { key: "max_positions", label: "Max positions", group: "Risk & sizing" },
+  { key: "max_portfolio_heat", label: "Max total open risk (fraction of equity)", group: "Risk & sizing" },
+];
+/** "null", "", "none" or a non-number → null; otherwise the number. */
+const optNum = (v: unknown) => (v == null || v === "" || v === "null" || v === "none" || !Number.isFinite(Number(v)) ? null : Number(v));
+
+/**
+ * Risk executor: next-open entries sized to risk `risk_per_trade` of equity over the stop distance
+ * (stop_atr × ATR at the signal; 3 × ATR when stop_atr is null), capped at max_position_pct, with
+ * max_positions slots and a max_portfolio_heat cap on total open risk. The stop (and a target, if
+ * reward_risk is set) is fixed from the fill and worked intraday (gaps fill at the open, stop first);
+ * after max_hold_days sessions the position is sold at the next open. Signals beyond the open slots
+ * are bought in the order `signals` returns them.
+ */
+function riskStrategy<P extends Risk>(spec: Spec<P>): StrategyDef<P> {
+  const defaults = { ...RISK, ...spec.defaults } as P;
+  return {
+    name: spec.name, description: spec.description, defaults, fields: [...spec.fields, ...RISK_FIELDS], studyHorizons: spec.studyHorizons,
+    warmupDays: warmupOf(spec, (p) => p.atr_period + 1),
+    create(raw) {
+      const p = { ...raw, stop_atr: optNum(raw.stop_atr), reward_risk: optNum(raw.reward_risk) } as P;
+      const sc = scanner(spec, p, p.atr_period + 1);
+      type Pos = { shares: number; entry: number; dist: number; stop: number | null; target: number | null; bars: number };
+      const pos = new Map<string, Pos>();
+      const distFor = new Map<string, number>(); // ticker → ATR stop distance at the signal
+      let eqPrev = 0;
+      let cash = 0;
+      const heat = () => [...pos.values()].reduce((a, x) => a + x.shares * x.dist, 0);
+      const levels = (entry: number, dist: number) => ({
+        stop: p.stop_atr != null ? entry - dist : null,
+        target: p.reward_risk != null ? entry + p.reward_risk * dist : null,
+      });
+      return {
+        onClose(ctx) {
+          const { liquid, riskOn } = sc.update(ctx);
+          eqPrev = ctx.equity; cash = ctx.portfolio.cash;
+          if (!ctx.trading) return [];
+          const orders: Order[] = [];
+          for (const [t, x] of pos) {
+            if (ctx.portfolio.sharesOf(t) <= 0) { pos.delete(t); continue; }
+            x.bars++;
+            if (x.bars >= p.max_hold_days) orders.push({ side: "sell", ticker: t, shares: "all", tag: "time_stop" });
+            else if (x.stop != null || x.target != null) orders.push({ side: "sell", ticker: t, shares: "all", stop: x.stop ?? undefined, target: x.target ?? undefined });
+          }
+          if (!riskOn) return orders;
+          distFor.clear();
+          for (const t of spec.signals(ctx, liquid, p)) {
+            if (pos.has(t) || ctx.portfolio.sharesOf(t) > 0) continue;
+            const atr = sc.tapes.get(t)!.t.atr(p.atr_period);
+            if (!(atr > 0)) continue;
+            const dist = (p.stop_atr ?? 3) * atr;
+            distFor.set(t, dist);
+            orders.push({
+              side: "buy", ticker: t, tag: "entry",
+              shares: (price) => {
+                if (pos.size >= p.max_positions || !(price > dist)) return 0;
+                const n = Math.min(Math.floor((eqPrev * p.risk_per_trade) / dist), Math.floor((eqPrev * p.max_position_pct) / price), Math.floor(cash / price));
+                if (n <= 0 || heat() + n * dist > p.max_portfolio_heat * eqPrev) return 0;
+                return n;
+              },
+              exits: (price) => { const l = levels(price, dist); return l.stop == null && l.target == null ? null : { stop: l.stop ?? undefined, target: l.target ?? undefined }; },
+            });
+          }
+          return orders;
+        },
+        universe: sc.universe,
+        onFill(f, ctx) {
+          if (f.side === "buy") {
+            const dist = distFor.get(f.ticker)!;
+            pos.set(f.ticker, { shares: f.shares, entry: f.price, dist, ...levels(f.price, dist), bars: 0 });
+            cash = ctx.portfolio.cash;
+          } else if (ctx.portfolio.sharesOf(f.ticker) <= 0) pos.delete(f.ticker);
         },
       };
     },
@@ -219,24 +344,26 @@ export const rsi2Deep = signalStrategy<Rsi2>({
     .map((x) => x.r.ticker),
 });
 
-type RsRsi2 = Rsi2 & { from_days: number; skip_days: number; top_pct: number };
-export const rsRsi2 = signalStrategy<RsRsi2>({
+type RsRsi2 = Risk & { from_days: number; skip_days: number; top_pct: number; rsi_max: number; trend_ma: number; rank_by: string };
+export const rsRsi2 = riskStrategy<RsRsi2>({
   name: "rs_rsi2",
-  description: "Signal study: top 20% by return from 126 to 21 sessions ago (ranked daily among liquid stocks) AND 2-day RSI under 10 AND close above its 200-day; SPY above its 200-day.",
-  defaults: { from_days: 126, skip_days: 21, top_pct: 0.2, rsi_max: 10, trend_ma: 200, hold_days: 5 },
+  description: "Top 20% by return from 126 to 21 sessions ago (ranked daily) AND 2-day RSI under 10 AND close above its 200-day; SPY above its 200-day. 3 × ATR stop, 20-session time exit, 0.75% risk per trade.",
+  defaults: { from_days: 126, skip_days: 21, top_pct: 0.2, rsi_max: 10, trend_ma: 200, rank_by: "rs" },
   fields: [
     { key: "from_days", label: "Return from (sessions ago)", group: "Signal" },
     { key: "skip_days", label: "… to (sessions ago)", group: "Signal" },
     { key: "top_pct", label: "Top fraction (0.2 = top 20%)", group: "Signal" },
     { key: "rsi_max", label: "RSI(2) under", group: "Signal" },
     { key: "trend_ma", label: "Close above MA (days)", group: "Signal" },
+    { key: "rank_by", label: "More signals than slots: buy first by", group: "Signal", choices: ["rs", "rsi2"],
+      help: "rs: strongest 126→21-day return first. rsi2: most oversold (lowest RSI(2)) first." },
   ],
   studyHorizons: [3, 5, 10, 15],
   bars: (p) => Math.max(p.trend_ma, p.from_days + 1),
   smas: (p) => [p.trend_ma],
   signals: (_ctx, liquid, p) => relativeStrength(liquid, p.from_days, p.skip_days)
     .filter(({ x, pct }) => pct > 1 - p.top_pct && x.t.rsi < p.rsi_max && x.r.c > x.ma[0])
-    .sort((a, b) => a.x.t.rsi - b.x.t.rsi)
+    .sort((a, b) => (p.rank_by === "rsi2" ? a.x.t.rsi - b.x.t.rsi || b.m - a.m : b.m - a.m || a.x.t.rsi - b.x.t.rsi))
     .map(({ x }) => x.r.ticker),
 });
 
