@@ -11,12 +11,12 @@ const dipX = (i: number) => (i === 300 ? 0.5 : i === 301 ? 0.7 : 0);
 const dipY = (i: number) => (i === 300 ? 0.4 : i === 301 ? 0.9 : 0);
 
 /** SPY up; 8 weak fillers; X strongest (wide ±1 daily ranges, so ATR ≈ 2); optional Y second strongest. */
-function market(o: { crashX?: number; withY?: boolean } = {}) {
+function market(o: { crashX?: number; withY?: boolean; dropCloseX?: [number, number] } = {}) {
   const rows = [];
   for (const [i, d] of D.entries()) {
     rows.push({ ...row("SPY", d, 100 + i * 0.1, 100 + i * 0.1), dv: 1e12 });
     for (let k = 0; k < 8; k++) { const c = 50 + i * 0.01; rows.push({ ...row(`F${k}`, d, c, c), dv: 1e9 }); }
-    const cx = 40 + i * 0.05 - dipX(i);
+    const cx = (40 + i * 0.05 - dipX(i)) * (o.dropCloseX && i === o.dropCloseX[0] ? 1 - o.dropCloseX[1] : 1);
     rows.push({ ...row("X", d, cx, cx), h: cx + 1, l: i === o.crashX ? cx - 30 : cx - 1, dv: 1e9 });
     if (o.withY) { const cy = 40 + i * 0.045 - dipY(i); rows.push({ ...row("Y", d, cy, cy), h: cy + 1, l: cy - 1, dv: 1e9 }); }
   }
@@ -64,4 +64,20 @@ test("rs_rsi2: a target only with reward_risk; rank_by picks between signals for
   assert.equal(first(byRs), "X");   // stronger 126→21-day return
   assert.equal(first(byRsi), "Y");  // lower RSI(2)
   assert.equal(byRs.fills.filter((f) => f.side === "buy" && f.d === D[302]).length, 1);
+});
+
+test("rs_rsi2 sizing=equal: equity ÷ max_positions in whole shares, no heat cap; disaster stop on the close", async () => {
+  const entry = 40 + 302 * 0.05;
+  const eq8 = await run(market(), { sizing: "equal", stop_atr: null });
+  assert.equal(eq8.fills.find((f) => f.side === "buy" && f.ticker === "X")!.shares, Math.floor(100_000 / 8 / entry));
+  const eq5 = await run(market(), { sizing: "equal", stop_atr: null, max_positions: 5, max_portfolio_heat: 0 });
+  assert.equal(eq5.fills.find((f) => f.side === "buy" && f.ticker === "X")!.shares, Math.floor(100_000 / 5 / entry)); // heat cap ignored
+  const riskZeroHeat = await run(market(), { max_portfolio_heat: 0 });
+  assert.equal(riskZeroHeat.fills.filter((f) => f.side === "buy").length, 0); // …but it binds risk sizing
+  // A close 25% under the entry on day 310 with a 20% disaster stop: sold at day 311's open.
+  const ds = await run(market({ dropCloseX: [310, 0.25] }), { sizing: "equal", stop_atr: null, disaster_stop_pct: 0.2 });
+  const x = ds.closed.find((c) => c.ticker === "X")!;
+  assert.deepEqual([x.exitD, x.exitTag], [D[311], "disaster_stop"]);
+  const ds30 = await run(market({ dropCloseX: [310, 0.25] }), { sizing: "equal", stop_atr: null, disaster_stop_pct: 0.3 });
+  assert.equal(ds30.closed.find((c) => c.ticker === "X")!.exitTag, "time_stop");
 });

@@ -1,0 +1,15 @@
+{
+  "name": "rs_rsi2-equal",
+  "from": "2005-01-01",
+  "to": "2018-12-31",
+  "capital": 25000,
+  "slippageBps": 10,
+  "commission": 0,
+  "bench": ["SPY"],
+  "runs": [
+    { "strategy": "rs_rsi2", "label": "equal 8 pos, 20 days", "params": { "stop_atr": null, "sizing": "equal", "max_positions": 8, "max_hold_days": 20 } },
+    { "strategy": "rs_rsi2", "label": "equal 8 pos, 40 days", "params": { "stop_atr": null, "sizing": "equal", "max_positions": 8, "max_hold_days": 40 } },
+    { "strategy": "rs_rsi2", "label": "equal 5 pos, 20 days", "params": { "stop_atr": null, "sizing": "equal", "max_positions": 5, "max_hold_days": 20 } },
+    { "strategy": "rs_rsi2", "label": "equal 8 pos, 20 days, 20% disaster stop", "params": { "stop_atr": null, "sizing": "equal", "max_positions": 8, "max_hold_days": 20, "disaster_stop_pct": 0.2 } }
+  ]
+}

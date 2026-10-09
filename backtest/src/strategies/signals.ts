@@ -189,12 +189,12 @@ function signalStrategy<P extends Base>(spec: Spec<P>): StrategyDef<P> {
 }
 
 type Risk = Filters & {
-  max_hold_days: number; stop_atr: number | null; atr_period: number; reward_risk: number | null;
-  risk_per_trade: number; max_position_pct: number; max_positions: number; max_portfolio_heat: number;
+  max_hold_days: number; stop_atr: number | null; atr_period: number; reward_risk: number | null; disaster_stop_pct: number | null;
+  sizing: string; risk_per_trade: number; max_position_pct: number; max_positions: number; max_portfolio_heat: number;
 };
 const RISK: Risk = {
-  ...FILTERS, max_hold_days: 20, stop_atr: 3, atr_period: 14, reward_risk: null,
-  risk_per_trade: 0.0075, max_position_pct: 0.2, max_positions: 8, max_portfolio_heat: 0.045,
+  ...FILTERS, max_hold_days: 20, stop_atr: 3, atr_period: 14, reward_risk: null, disaster_stop_pct: null,
+  sizing: "risk", risk_per_trade: 0.0075, max_position_pct: 0.2, max_positions: 8, max_portfolio_heat: 0.045,
 };
 const RISK_FIELDS: ParamField[] = [
   ...FILTER_FIELDS,
@@ -202,21 +202,26 @@ const RISK_FIELDS: ParamField[] = [
   { key: "stop_atr", label: "Stop: entry − × ATR (null = no stop)", group: "Exits", help: "Without a stop, positions are still sized as if the stop were 3 × ATR away." },
   { key: "atr_period", label: "ATR period (days)", group: "Exits" },
   { key: "reward_risk", label: "Target: R multiple of the stop distance (null = none)", group: "Exits" },
-  { key: "risk_per_trade", label: "Risk per trade (fraction of equity)", group: "Risk & sizing" },
-  { key: "max_position_pct", label: "Max position (fraction of equity)", group: "Risk & sizing" },
+  { key: "disaster_stop_pct", label: "Disaster stop: close this far under entry (null = none)", group: "Exits",
+    help: "e.g. 0.20: a close 20% or more below the entry sells at the next open." },
+  { key: "sizing", label: "Sizing", group: "Risk & sizing", choices: ["risk", "equal"],
+    help: "risk: risk_per_trade over the stop distance, capped by max_position_pct and the heat cap. equal: equity ÷ max_positions each, no heat cap." },
+  { key: "risk_per_trade", label: "Risk per trade (fraction of equity, risk sizing)", group: "Risk & sizing" },
+  { key: "max_position_pct", label: "Max position (fraction of equity, risk sizing)", group: "Risk & sizing" },
   { key: "max_positions", label: "Max positions", group: "Risk & sizing" },
-  { key: "max_portfolio_heat", label: "Max total open risk (fraction of equity)", group: "Risk & sizing" },
+  { key: "max_portfolio_heat", label: "Max total open risk (fraction of equity, risk sizing)", group: "Risk & sizing" },
 ];
 /** "null", "", "none" or a non-number → null; otherwise the number. */
 const optNum = (v: unknown) => (v == null || v === "" || v === "null" || v === "none" || !Number.isFinite(Number(v)) ? null : Number(v));
 
 /**
- * Risk executor: next-open entries sized to risk `risk_per_trade` of equity over the stop distance
- * (stop_atr × ATR at the signal; 3 × ATR when stop_atr is null), capped at max_position_pct, with
- * max_positions slots and a max_portfolio_heat cap on total open risk. The stop (and a target, if
- * reward_risk is set) is fixed from the fill and worked intraday (gaps fill at the open, stop first);
- * after max_hold_days sessions the position is sold at the next open. Signals beyond the open slots
- * are bought in the order `signals` returns them.
+ * Risk executor. Sizing "risk": next-open entries sized to risk `risk_per_trade` of equity over the
+ * stop distance (stop_atr × ATR at the signal; 3 × ATR when stop_atr is null), capped at
+ * max_position_pct, with max_positions slots and a max_portfolio_heat cap on total open risk.
+ * Sizing "equal": equity ÷ max_positions per position (whole shares, prior close's equity), no heat cap.
+ * The stop (and a target, if reward_risk is set) is fixed from the fill and worked intraday (gaps fill
+ * at the open, stop first); a close disaster_stop_pct under the entry, or max_hold_days sessions held,
+ * sells at the next open. Signals beyond the open slots are bought in the order `signals` returns them.
  */
 function riskStrategy<P extends Risk>(spec: Spec<P>): StrategyDef<P> {
   const defaults = { ...RISK, ...spec.defaults } as P;
@@ -224,7 +229,8 @@ function riskStrategy<P extends Risk>(spec: Spec<P>): StrategyDef<P> {
     name: spec.name, description: spec.description, defaults, fields: [...spec.fields, ...RISK_FIELDS], studyHorizons: spec.studyHorizons,
     warmupDays: warmupOf(spec, (p) => p.atr_period + 1),
     create(raw) {
-      const p = { ...raw, stop_atr: optNum(raw.stop_atr), reward_risk: optNum(raw.reward_risk) } as P;
+      const p = { ...raw, stop_atr: optNum(raw.stop_atr), reward_risk: optNum(raw.reward_risk), disaster_stop_pct: optNum(raw.disaster_stop_pct) } as P;
+      const equal = p.sizing === "equal";
       const sc = scanner(spec, p, p.atr_period + 1);
       type Pos = { shares: number; entry: number; dist: number; stop: number | null; target: number | null; bars: number };
       const pos = new Map<string, Pos>();
@@ -245,7 +251,9 @@ function riskStrategy<P extends Risk>(spec: Spec<P>): StrategyDef<P> {
           for (const [t, x] of pos) {
             if (ctx.portfolio.sharesOf(t) <= 0) { pos.delete(t); continue; }
             x.bars++;
-            if (x.bars >= p.max_hold_days) orders.push({ side: "sell", ticker: t, shares: "all", tag: "time_stop" });
+            const c = ctx.row(t)?.c;
+            if (p.disaster_stop_pct != null && c != null && c <= x.entry * (1 - p.disaster_stop_pct)) orders.push({ side: "sell", ticker: t, shares: "all", tag: "disaster_stop" });
+            else if (x.bars >= p.max_hold_days) orders.push({ side: "sell", ticker: t, shares: "all", tag: "time_stop" });
             else if (x.stop != null || x.target != null) orders.push({ side: "sell", ticker: t, shares: "all", stop: x.stop ?? undefined, target: x.target ?? undefined });
           }
           if (!riskOn) return orders;
@@ -253,13 +261,16 @@ function riskStrategy<P extends Risk>(spec: Spec<P>): StrategyDef<P> {
           for (const t of spec.signals(ctx, liquid, p)) {
             if (pos.has(t) || ctx.portfolio.sharesOf(t) > 0) continue;
             const atr = sc.tapes.get(t)!.t.atr(p.atr_period);
-            if (!(atr > 0)) continue;
-            const dist = (p.stop_atr ?? 3) * atr;
+            const needAtr = !equal || p.stop_atr != null || p.reward_risk != null;
+            if (needAtr && !(atr > 0)) continue;
+            const dist = atr > 0 ? (p.stop_atr ?? 3) * atr : 0;
             distFor.set(t, dist);
             orders.push({
               side: "buy", ticker: t, tag: "entry",
               shares: (price) => {
-                if (pos.size >= p.max_positions || !(price > dist)) return 0;
+                if (pos.size >= p.max_positions) return 0;
+                if (equal) return Math.max(0, Math.min(Math.floor(eqPrev / p.max_positions / price), Math.floor(cash / price)));
+                if (!(price > dist)) return 0;
                 const n = Math.min(Math.floor((eqPrev * p.risk_per_trade) / dist), Math.floor((eqPrev * p.max_position_pct) / price), Math.floor(cash / price));
                 if (n <= 0 || heat() + n * dist > p.max_portfolio_heat * eqPrev) return 0;
                 return n;
@@ -274,8 +285,8 @@ function riskStrategy<P extends Risk>(spec: Spec<P>): StrategyDef<P> {
           if (f.side === "buy") {
             const dist = distFor.get(f.ticker)!;
             pos.set(f.ticker, { shares: f.shares, entry: f.price, dist, ...levels(f.price, dist), bars: 0 });
-            cash = ctx.portfolio.cash;
           } else if (ctx.portfolio.sharesOf(f.ticker) <= 0) pos.delete(f.ticker);
+          cash = ctx.portfolio.cash; // sales at the open fund the same morning's buys
         },
       };
     },
