@@ -11,9 +11,13 @@ export async function runOne(data: DataSource, spec: RunSpec): Promise<{ result:
   const def = STRATEGIES[spec.strategy];
   if (!def) throw new Error(`Unknown strategy "${spec.strategy}". Known: ${Object.keys(STRATEGIES).join(", ")}`);
   const result = await runBacktest(data, def, spec.params, spec.opt);
+  return { result, stats: statsOf(result, spec.tax) };
+}
+
+/** Stats of a finished run (open positions' gains count as unrealized for the after-tax figure). */
+export function statsOf(result: RunResult, tax?: TaxRates) {
   const unrealized = result.open.reduce((a, l) => a + l.shares * ((result.finalPrices[l.ticker] ?? l.price) - l.price), 0);
-  const stats = computeStats(result.equity, result.closed, { dividends: result.dividendsByYear, tax: spec.tax, unrealizedGain: unrealized });
-  return { result, stats };
+  return computeStats(result.equity, result.closed, { dividends: result.dividendsByYear, tax, unrealizedGain: unrealized });
 }
 
 const csv = (rows: Record<string, unknown>[]) => {

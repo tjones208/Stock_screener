@@ -1,0 +1,18 @@
+{
+  "name": "rs_rsi2",
+  "from": "2005-01-01",
+  "to": "2018-12-31",
+  "capital": 25000,
+  "slippageBps": 10,
+  "commission": 0,
+  "bench": ["SPY"],
+  "montecarlo": {
+    "seeds": { "from": 1, "to": 100 },
+    "seedParam": "seed",
+    "benchmark": "SPY",
+    "groups": [
+      { "strategy": "rs_rsi2", "label": "A: no max_atr_pct", "params": { "rank_by": "random", "sizing": "equal", "max_positions": 8, "max_hold_days": 20, "stop_atr": null, "disaster_stop_pct": 0.2 } },
+      { "strategy": "rs_rsi2", "label": "B: max_atr_pct 0.06", "params": { "rank_by": "random", "sizing": "equal", "max_positions": 8, "max_hold_days": 20, "stop_atr": null, "disaster_stop_pct": 0.2, "max_atr_pct": 0.06 } }
+    ]
+  }
+}

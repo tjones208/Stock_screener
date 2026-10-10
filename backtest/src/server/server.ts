@@ -111,7 +111,12 @@ const BATCHES = join(BT_ROOT, "batches");
 function savedBatches() {
   if (!existsSync(BATCHES)) return [];
   return readdirSync(BATCHES).filter((f) => f.endsWith(".json")).sort().map((file) => {
-    const b = readJson<{ name?: string; from?: string; to?: string; capital?: number; slippageBps?: number; bench?: string[]; runs?: { label?: string; strategy: string }[] } | null>(join(BATCHES, file), null);
+    const b = readJson<{ name?: string; from?: string; to?: string; capital?: number; slippageBps?: number; bench?: string[]; runs?: { label?: string; strategy: string }[];
+      montecarlo?: { seeds: number[] | { from: number; to: number }; groups: { label?: string; strategy: string }[] } } | null>(join(BATCHES, file), null);
+    if (b?.montecarlo && Array.isArray(b.montecarlo.groups)) {
+      const s = b.montecarlo.seeds, n = Array.isArray(s) ? s.length : s.to - s.from + 1;
+      b.runs = b.montecarlo.groups.map((g) => ({ strategy: g.strategy, label: `${g.label ?? g.strategy} × ${n} seeds` }));
+    }
     return b && Array.isArray(b.runs)
       ? { file, name: b.name ?? file.replace(/\.json$/, ""), from: b.from ?? null, to: b.to ?? null, capital: b.capital ?? null, slippageBps: b.slippageBps ?? null, bench: b.bench ?? [],
           runs: b.runs.map((r) => r.label ?? r.strategy) }

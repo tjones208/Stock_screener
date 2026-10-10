@@ -192,11 +192,13 @@ function signalStrategy<P extends Base>(spec: Spec<P>): StrategyDef<P> {
 type Risk = Filters & {
   max_hold_days: number; stop_atr: number | null; atr_period: number; reward_risk: number | null; disaster_stop_pct: number | null;
   max_atr_pct: number | null; max_per_sector: number | null;
+  /** With more signals than slots: "rs" (signal order), "rsi2" or "random" (seeded). */
+  rank_by: string; seed: number;
   sizing: string; risk_per_trade: number; max_position_pct: number; max_positions: number; max_portfolio_heat: number;
 };
 const RISK: Risk = {
   ...FILTERS, max_hold_days: 20, stop_atr: 3, atr_period: 14, reward_risk: null, disaster_stop_pct: null,
-  max_atr_pct: null, max_per_sector: null, sizing: "risk", risk_per_trade: 0.0075, max_position_pct: 0.2, max_positions: 8, max_portfolio_heat: 0.045,
+  max_atr_pct: null, max_per_sector: null, rank_by: "rs", seed: 1, sizing: "risk", risk_per_trade: 0.0075, max_position_pct: 0.2, max_positions: 8, max_portfolio_heat: 0.045,
 };
 const RISK_FIELDS: ParamField[] = [
   ...FILTER_FIELDS,
@@ -217,6 +219,23 @@ const RISK_FIELDS: ParamField[] = [
   { key: "max_positions", label: "Max positions", group: "Risk & sizing" },
   { key: "max_portfolio_heat", label: "Max total open risk (fraction of equity, risk sizing)", group: "Risk & sizing" },
 ];
+/** Executor-only settings: runs that differ only in these share one signal scan (runBacktestMany). */
+const EXEC_KEYS = new Set([...Object.keys(RISK).filter((k) => !(k in FILTERS) && k !== "atr_period"), "rank_by", "seed"]);
+
+/** Seeded generator (mulberry32) keyed to a seed and a date: the same seed replays the same orderings. */
+function rng(seed: number, d: string) {
+  let h = Math.imul(seed | 0, 0x9e3779b1) ^ 0x85ebca6b;
+  for (let i = 0; i < d.length; i++) h = Math.imul(h ^ d.charCodeAt(i), 0x01000193);
+  let a = h >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
 /** "null", "", "none" or a non-number → null; otherwise the number. */
 const optNum = (v: unknown) => (v == null || v === "" || v === "null" || v === "none" || !Number.isFinite(Number(v)) ? null : Number(v));
 
@@ -227,14 +246,15 @@ const optNum = (v: unknown) => (v == null || v === "" || v === "null" || v === "
  * Sizing "equal": equity ÷ max_positions per position (whole shares, prior close's equity), no heat cap.
  * The stop (and a target, if reward_risk is set) is fixed from the fill and worked intraday (gaps fill
  * at the open, stop first); a close disaster_stop_pct under the entry, or max_hold_days sessions held,
- * sells at the next open. Signals beyond the open slots are bought in the order `signals` returns them.
+ * sells at the next open. With more signals than slots, `rank_by` decides who is bought first: "rs"
+ * (the order `signals` returns), "rsi2" (lowest RSI(2) first) or "random" (shuffled each day from `seed`).
  */
 function riskStrategy<P extends Risk>(spec: Spec<P>): StrategyDef<P> {
   const defaults = { ...RISK, ...spec.defaults } as P;
   return {
     name: spec.name, description: spec.description, defaults, fields: [...spec.fields, ...RISK_FIELDS], studyHorizons: spec.studyHorizons,
     warmupDays: warmupOf(spec, (p) => p.atr_period + 1),
-    create(raw) {
+    create(raw, env) {
       const p = { ...raw, stop_atr: optNum(raw.stop_atr), reward_risk: optNum(raw.reward_risk), disaster_stop_pct: optNum(raw.disaster_stop_pct),
         max_atr_pct: optNum(raw.max_atr_pct), max_per_sector: optNum(raw.max_per_sector) } as P;
       const sectors = new Map<string, string>(); // ticker → sector, for max_per_sector
@@ -244,7 +264,34 @@ function riskStrategy<P extends Risk>(spec: Spec<P>): StrategyDef<P> {
         return s;
       };
       const equal = p.sizing === "equal";
-      const sc = scanner(spec, p, p.atr_period + 1);
+      // The day's scan and signal list (in rs order) are shared by every run with the same signal settings.
+      const key = `scan:${spec.name}:${JSON.stringify(Object.entries(p).filter(([k]) => !EXEC_KEYS.has(k)).sort())}`;
+      const shared = env.shared ?? new Map<string, unknown>();
+      type Scan = { sc: ReturnType<typeof scanner<P>>; d: string | null; liquid: Liquid[]; riskOn: boolean; signals: string[] };
+      let scan = shared.get(key) as Scan | undefined;
+      if (!scan) shared.set(key, (scan = { sc: scanner(spec, p, p.atr_period + 1), d: null, liquid: [], riskOn: false, signals: [] }));
+      const S = scan;
+      const sc = S.sc;
+      const today = (ctx: Ctx) => {
+        if (S.d !== ctx.d) {
+          const r = sc.update(ctx);
+          S.liquid = r.liquid; S.riskOn = r.riskOn; S.d = ctx.d;
+          S.signals = ctx.trading && r.riskOn ? spec.signals(ctx, r.liquid, { ...p, rank_by: "rs" }) : [];
+        }
+        return S;
+      };
+      const ordered = (ctx: Ctx, list: string[]) => {
+        if (p.rank_by === "rsi2") {
+          const at = new Map(list.map((t, k) => [t, k]));
+          return [...list].sort((a, b) => sc.tapes.get(a)!.t.rsi - sc.tapes.get(b)!.t.rsi || at.get(a)! - at.get(b)!);
+        }
+        if (p.rank_by === "random") {
+          const out = [...list], r = rng(Number(p.seed) || 0, ctx.d);
+          for (let k = out.length - 1; k > 0; k--) { const j = Math.floor(r() * (k + 1)); [out[k], out[j]] = [out[j], out[k]]; }
+          return out;
+        }
+        return list;
+      };
       type Pos = { shares: number; entry: number; dist: number; stop: number | null; target: number | null; bars: number };
       const pos = new Map<string, Pos>();
       const distFor = new Map<string, number>(); // ticker → ATR stop distance at the signal
@@ -257,7 +304,7 @@ function riskStrategy<P extends Risk>(spec: Spec<P>): StrategyDef<P> {
       });
       return {
         onClose(ctx) {
-          const { liquid, riskOn } = sc.update(ctx);
+          const { riskOn, signals } = today(ctx);
           eqPrev = ctx.equity; cash = ctx.portfolio.cash;
           if (!ctx.trading) return [];
           const orders: Order[] = [];
@@ -271,7 +318,7 @@ function riskStrategy<P extends Risk>(spec: Spec<P>): StrategyDef<P> {
           }
           if (!riskOn) return orders;
           distFor.clear();
-          for (const t of spec.signals(ctx, liquid, p)) {
+          for (const t of ordered(ctx, signals)) {
             if (pos.has(t) || ctx.portfolio.sharesOf(t) > 0) continue;
             const atr = sc.tapes.get(t)!.t.atr(p.atr_period);
             const needAtr = !equal || p.stop_atr != null || p.reward_risk != null || p.max_atr_pct != null;
@@ -371,26 +418,27 @@ export const rsi2Deep = signalStrategy<Rsi2>({
     .map((x) => x.r.ticker),
 });
 
-type RsRsi2 = Risk & { from_days: number; skip_days: number; top_pct: number; rsi_max: number; trend_ma: number; rank_by: string };
+type RsRsi2 = Risk & { from_days: number; skip_days: number; top_pct: number; rsi_max: number; trend_ma: number };
 export const rsRsi2 = riskStrategy<RsRsi2>({
   name: "rs_rsi2",
   description: "Top 20% by return from 126 to 21 sessions ago (ranked daily) AND 2-day RSI under 10 AND close above its 200-day; SPY above its 200-day. 3 × ATR stop, 20-session time exit, 0.75% risk per trade.",
-  defaults: { from_days: 126, skip_days: 21, top_pct: 0.2, rsi_max: 10, trend_ma: 200, rank_by: "rs" },
+  defaults: { from_days: 126, skip_days: 21, top_pct: 0.2, rsi_max: 10, trend_ma: 200, rank_by: "rs", seed: 1 },
   fields: [
     { key: "from_days", label: "Return from (sessions ago)", group: "Signal" },
     { key: "skip_days", label: "… to (sessions ago)", group: "Signal" },
     { key: "top_pct", label: "Top fraction (0.2 = top 20%)", group: "Signal" },
     { key: "rsi_max", label: "RSI(2) under", group: "Signal" },
     { key: "trend_ma", label: "Close above MA (days)", group: "Signal" },
-    { key: "rank_by", label: "More signals than slots: buy first by", group: "Signal", choices: ["rs", "rsi2"],
-      help: "rs: strongest 126→21-day return first. rsi2: most oversold (lowest RSI(2)) first." },
+    { key: "rank_by", label: "More signals than slots: buy first by", group: "Signal", choices: ["rs", "rsi2", "random"],
+      help: "rs: strongest 126→21-day return first. rsi2: most oversold (lowest RSI(2)) first. random: shuffled each day from the seed." },
+    { key: "seed", label: "Random seed (rank_by random)", group: "Signal" },
   ],
   studyHorizons: [3, 5, 10, 15],
   bars: (p) => Math.max(p.trend_ma, p.from_days + 1),
   smas: (p) => [p.trend_ma],
   signals: (_ctx, liquid, p) => relativeStrength(liquid, p.from_days, p.skip_days)
     .filter(({ x, pct }) => pct > 1 - p.top_pct && x.t.rsi < p.rsi_max && x.r.c > x.ma[0])
-    .sort((a, b) => (p.rank_by === "rsi2" ? a.x.t.rsi - b.x.t.rsi || b.m - a.m : b.m - a.m || a.x.t.rsi - b.x.t.rsi))
+    .sort((a, b) => (p.rank_by === "rsi2" ? a.x.t.rsi - b.x.t.rsi || b.m - a.m : b.m - a.m || a.x.t.rsi - b.x.t.rsi)) // the executor reorders for rank_by
     .map(({ x }) => x.r.ticker),
 });
 
