@@ -1,0 +1,20 @@
+{
+  "name": "rs_rsi2",
+  "from": "2005-01-01",
+  "to": "2018-12-31",
+  "capital": 25000,
+  "slippageBps": 10,
+  "commission": 0,
+  "bench": ["SPY"],
+  "grid": {
+    "strategy": "rs_rsi2",
+    "params": { "rank_by": "rs", "sizing": "equal", "stop_atr": null, "disaster_stop_pct": 0.2 },
+    "axes": {
+      "max_positions": [6, 7, 8, 9, 10],
+      "max_hold_days": [15, 20, 25],
+      "max_atr_pct": [null, 0.06]
+    },
+    "beat": 0.08,
+    "output": "neighborhood"
+  }
+}

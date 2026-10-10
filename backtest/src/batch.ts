@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { runBacktestMany, type DataSource } from "./engine/engine.ts";
 import { STRATEGIES } from "./strategies/index.ts";
 import type { Stats, TaxRates } from "./engine/metrics.ts";
-import { runOne, statsOf, sweepCsv, writeRun, type RunSpec } from "./report.ts";
+import { grid, runOne, statsOf, sweepCsv, writeRun, type RunSpec } from "./report.ts";
 
 export type BatchRun = {
   label?: string; strategy: string; params?: Record<string, unknown>;
@@ -32,6 +32,12 @@ export type BatchSpec = {
    * seeds beating the benchmark's CAGR) and montecarlo-<name>-runs.csv (one line per seed).
    */
   montecarlo?: { seeds: number[] | { from: number; to: number }; seedParam?: string; benchmark?: string; groups: BatchRun[] };
+  /**
+   * Parameter neighborhood: one run per combination of `axes` on top of `params`, all in one pass
+   * over the data. Writes <output>-<name>.csv (default "grid"): one row per run (the axis values,
+   * CAGR, max drawdown, end value) and a summary (median CAGR, runs with CAGR above `beat`).
+   */
+  grid?: { strategy: string; params?: Record<string, unknown>; axes: Record<string, unknown[]>; beat?: number; output?: string };
 };
 export type BatchEvent =
   | { type: "start"; dir: string; runs: number }
@@ -56,6 +62,7 @@ export function percentile(values: number[], q: number) {
 
 export async function runBatch(data: DataSource, spec: BatchSpec, resultsDir: string, emit: (e: BatchEvent) => void = () => {}) {
   if (spec.montecarlo) return runMonteCarlo(data, spec, resultsDir, emit);
+  if (spec.grid) return runGrid(data, spec, resultsDir, emit);
   const runList = spec.runs ?? [];
   const days = data.days();
   if (!days.length) throw new Error("The data set has no trading days");
@@ -105,27 +112,25 @@ export async function runBatch(data: DataSource, spec: BatchSpec, resultsDir: st
   return { dir, rows, bench };
 }
 
-async function runMonteCarlo(data: DataSource, spec: BatchSpec, resultsDir: string, emit: (e: BatchEvent) => void) {
-  const mc = spec.montecarlo!;
+type PassRun = { label: string; strategy: string; params: Record<string, unknown>; group?: string; seed?: number };
+type PassRow = { folder: string; label: string; strategy: string; params: Record<string, unknown>; stats: Stats; group?: string; seed?: number };
+
+/** Benchmarks, then every run in one pass over the data; writes run folders, batch.json and batch.csv. */
+async function runOnePass(data: DataSource, spec: BatchSpec, resultsDir: string, emit: (e: BatchEvent) => void, runs: PassRun[], benchFirst: string | null, what: string) {
   const days = data.days();
   if (!days.length) throw new Error("The data set has no trading days");
   const from = spec.from ?? days[Math.min(days.length - 1, 260)];
   const to = spec.to ?? days[days.length - 1];
   const opt = { from, to, capital: spec.capital ?? 20_000, slippageBps: spec.slippageBps ?? 10, commission: spec.commission ?? 0 };
   const tax = spec.tax ?? { st: 0.3, lt: 0.15 };
-  const range = mc.seeds as { from: number; to: number };
-  const seeds = Array.isArray(mc.seeds) ? mc.seeds : Array.from({ length: range.to - range.from + 1 }, (_, k) => range.from + k);
-  const seedParam = mc.seedParam ?? "seed";
-  const benchT = mc.benchmark ?? spec.bench?.[0] ?? "SPY";
   const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-  const name = spec.name ?? "montecarlo";
+  const name = spec.name ?? what;
   const dir = join(resultsDir, `${stamp}-${slug(name)}`);
   mkdirSync(dir, { recursive: true });
-  const runs = mc.groups.flatMap((g) => seeds.map((seed) => ({ group: g, seed, label: `${runLabel(g)} seed ${seed}`, params: { ...(g.params ?? {}), [seedParam]: seed } })));
   emit({ type: "start", dir, runs: runs.length });
 
   const bench: Record<string, Stats> = {};
-  for (const t of [...new Set([benchT, ...(spec.bench ?? [])])]) {
+  for (const t of [...new Set([...(benchFirst ? [benchFirst] : []), ...(spec.bench ?? [])])]) {
     try {
       const b = await runOne(data, { strategy: "buyhold", params: { ticker: t }, opt, tax });
       bench[t] = b.stats;
@@ -135,21 +140,59 @@ async function runMonteCarlo(data: DataSource, spec: BatchSpec, resultsDir: stri
       emit({ type: "log", text: `Benchmark ${t} skipped: ${String(e instanceof Error ? e.message : e)}` });
     }
   }
-  emit({ type: "log", text: `${runs.length} runs (${mc.groups.length} configs × ${seeds.length} seeds) in one pass over the data…` });
+  emit({ type: "log", text: `${runs.length} runs (${what}) in one pass over the data…` });
   const results = await runBacktestMany(data, runs.map((r) => {
-    const def = STRATEGIES[r.group.strategy];
-    if (!def) throw new Error(`Unknown strategy "${r.group.strategy}"`);
+    const def = STRATEGIES[r.strategy];
+    if (!def) throw new Error(`Unknown strategy "${r.strategy}"`);
     return { def, params: r.params };
-  }), { ...opt, onProgress: (done, total) => emit({ type: "progress", run: 1, runs: 1, label: `${runs.length} seed runs`, done, total }) });
+  }), { ...opt, onProgress: (done, total) => emit({ type: "progress", run: 1, runs: 1, label: `${runs.length} runs`, done, total }) });
 
-  const rows: { folder: string; label: string; strategy: string; params: Record<string, unknown>; stats: Stats; group: string; seed: number }[] = [];
-  results.forEach((res, k) => {
+  const rows: PassRow[] = results.map((res, k) => {
     const r = runs[k], stats = statsOf(res, tax);
     const folder = `run-${String(k + 1).padStart(3, "0")}-${slug(r.label)}`;
-    writeRun(join(dir, folder), { strategy: r.group.strategy, params: r.params, opt, tax }, { result: res, stats }, bench, r.label);
-    rows.push({ folder, label: r.label, strategy: r.group.strategy, params: r.params, stats, group: runLabel(r.group), seed: r.seed });
+    writeRun(join(dir, folder), { strategy: r.strategy, params: r.params, opt, tax }, { result: res, stats }, bench, r.label);
+    return { folder, label: r.label, strategy: r.strategy, params: r.params, stats, group: r.group, seed: r.seed };
   });
+  const json = JSON.stringify({ name, created: new Date().toISOString(), spec: { ...spec, from, to }, benchmarks: bench, runs: rows.map(({ group: _g, seed: _s, ...x }) => x) }, null, 2);
+  writeFileSync(join(dir, "batch.json"), json);
+  writeFileSync(join(dir, "batch.csv"), sweepCsv(rows.map((x) => ({ params: { label: x.label, strategy: x.strategy, ...x.params }, stats: x.stats }))));
+  return { dir, rows, bench, name };
+}
 
+async function runGrid(data: DataSource, spec: BatchSpec, resultsDir: string, emit: (e: BatchEvent) => void) {
+  const g = spec.grid!;
+  const keys = Object.keys(g.axes);
+  const combos = grid(g.axes as Record<string, unknown[]>);
+  const show = (v: unknown) => (v === null ? "null" : String(v));
+  const runs: PassRun[] = combos.map((c) => ({ label: keys.map((k) => `${k}=${show(c[k])}`).join(" "), strategy: g.strategy, params: { ...(g.params ?? {}), ...c } }));
+  const { dir, rows, bench, name } = await runOnePass(data, spec, resultsDir, emit, runs, null, `${combos.length} combinations`);
+  const beat = g.beat ?? 0;
+  const esc = (v: string) => (/[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
+  const f = (x: number | null | undefined, k = 6) => (x == null || !Number.isFinite(x) ? "" : String(+x.toFixed(k)));
+  const lines = [["run", ...keys, "cagr", "max_drawdown", "end_value"].join(",")];
+  rows.forEach((r, k) => lines.push([esc(r.label), ...keys.map((x) => show(combos[k][x])), f(r.stats.cagr), f(r.stats.maxDrawdown), f(r.stats.endValue, 2)].join(",")));
+  const cagrs = rows.map((r) => r.stats.cagr);
+  const med = percentile(cagrs, 0.5), above = cagrs.filter((c) => c > beat).length;
+  lines.push("", "summary,value", `runs,${rows.length}`, `median_cagr,${f(med)}`, `runs_with_cagr_above_${f(beat * 100, 2)}pct,${above}`,
+    `share_above_${f(beat * 100, 2)}pct,${f(above / rows.length, 4)}`);
+  for (const [t, st] of Object.entries(bench)) lines.push(`${t}_cagr,${f(st.cagr)}`);
+  const file = `${g.output ?? "grid"}-${slug(name)}.csv`;
+  writeFileSync(join(dir, file), lines.join("\n") + "\n");
+  const pc = (x: number | null) => (x == null ? "—" : `${(x * 100).toFixed(1)}%`);
+  for (const r of rows) emit({ type: "log", text: `${r.label}: CAGR ${pc(r.stats.cagr)}, max drawdown ${pc(r.stats.maxDrawdown)}, end value $${Math.round(r.stats.endValue).toLocaleString()}` });
+  emit({ type: "log", text: `Median CAGR across ${rows.length} runs: ${pc(med)}; ${above} of ${rows.length} beat ${pc(beat)}. Saved ${file}.` });
+  emit({ type: "done", dir });
+  return { dir, rows, bench };
+}
+
+async function runMonteCarlo(data: DataSource, spec: BatchSpec, resultsDir: string, emit: (e: BatchEvent) => void) {
+  const mc = spec.montecarlo!;
+  const range = mc.seeds as { from: number; to: number };
+  const seeds = Array.isArray(mc.seeds) ? mc.seeds : Array.from({ length: range.to - range.from + 1 }, (_, k) => range.from + k);
+  const seedParam = mc.seedParam ?? "seed";
+  const benchT = mc.benchmark ?? spec.bench?.[0] ?? "SPY";
+  const runs: PassRun[] = mc.groups.flatMap((g) => seeds.map((seed) => ({ group: runLabel(g), seed, strategy: g.strategy, label: `${runLabel(g)} seed ${seed}`, params: { ...(g.params ?? {}), [seedParam]: seed } })));
+  const { dir, rows, bench, name } = await runOnePass(data, spec, resultsDir, emit, runs, benchT, `${mc.groups.length} configs × ${seeds.length} seeds`);
   const bc = bench[benchT]?.cagr ?? null;
   const q = (xs: number[]) => [percentile(xs, 0.05), percentile(xs, 0.5), percentile(xs, 0.95)];
   const f = (x: number | null) => (x == null ? "" : String(+x.toFixed(6)));
@@ -168,9 +211,6 @@ async function runMonteCarlo(data: DataSource, spec: BatchSpec, resultsDir: stri
   const sumCsv = summary.join("\n") + "\n";
   writeFileSync(join(dir, `montecarlo-${slug(name)}.csv`), sumCsv);
   writeFileSync(join(dir, `montecarlo-${slug(name)}-runs.csv`), sweepCsv(rows.map((x) => ({ params: { config: x.group, seed: x.seed }, stats: x.stats }))));
-  const json = JSON.stringify({ name, created: new Date().toISOString(), spec: { ...spec, from, to }, benchmarks: bench, runs: rows.map(({ group: _g, seed: _s, ...x }) => x) }, null, 2);
-  writeFileSync(join(dir, "batch.json"), json);
-  writeFileSync(join(dir, "batch.csv"), sweepCsv(rows.map((x) => ({ params: { label: x.label, strategy: x.strategy, ...x.params }, stats: x.stats }))));
   emit({ type: "done", dir });
   return { dir, rows, bench };
 }

@@ -112,7 +112,13 @@ function savedBatches() {
   if (!existsSync(BATCHES)) return [];
   return readdirSync(BATCHES).filter((f) => f.endsWith(".json")).sort().map((file) => {
     const b = readJson<{ name?: string; from?: string; to?: string; capital?: number; slippageBps?: number; bench?: string[]; runs?: { label?: string; strategy: string }[];
-      montecarlo?: { seeds: number[] | { from: number; to: number }; groups: { label?: string; strategy: string }[] } } | null>(join(BATCHES, file), null);
+      montecarlo?: { seeds: number[] | { from: number; to: number }; groups: { label?: string; strategy: string }[] };
+      grid?: { strategy: string; axes: Record<string, unknown[]> } } | null>(join(BATCHES, file), null);
+    if (b?.grid && b.grid.axes && typeof b.grid.axes === "object") {
+      const axes = Object.entries(b.grid.axes);
+      const n = axes.reduce((a, [, v]) => a * (Array.isArray(v) ? v.length : 1), 1);
+      b.runs = [{ strategy: b.grid.strategy, label: `${b.grid.strategy}: ${n} combinations of ${axes.map(([k, v]) => `${k} (${Array.isArray(v) ? v.map((x) => (x === null ? "null" : x)).join(", ") : v})`).join(" × ")}` }];
+    }
     if (b?.montecarlo && Array.isArray(b.montecarlo.groups)) {
       const s = b.montecarlo.seeds, n = Array.isArray(s) ? s.length : s.to - s.from + 1;
       b.runs = b.montecarlo.groups.map((g) => ({ strategy: g.strategy, label: `${g.label ?? g.strategy} × ${n} seeds` }));

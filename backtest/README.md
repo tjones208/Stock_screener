@@ -203,7 +203,9 @@ batches/rs_rsi2.json`. A named batch also writes `batch-<name>.json` and `batch-
 config once per seed, all in one pass over the data (runs with the same signal settings share the
 daily scan), and writes `montecarlo-<name>.csv` (5th / median / 95th percentile of CAGR, max drawdown
 and end value per config, and the share of seeds beating the benchmark's CAGR) plus
-`montecarlo-<name>-runs.csv` (one line per seed). A run with
+`montecarlo-<name>-runs.csv` (one line per seed). A `grid` block (`batches/neighborhood-rs_rsi2.json`) runs every combination of
+`axes` on top of `params` in one pass and writes `<output>-<name>.csv`: one row per run (axis values,
+CAGR, max drawdown, end value) and a summary (median CAGR, runs with CAGR above `beat`). A run with
 `"requires": "sectors"` is skipped (with a note in the log) when the data has no SIC codes. A setting
 can be switched off with `null` (in JSON, `--set stop_atr=null`, or typed into the app).
 

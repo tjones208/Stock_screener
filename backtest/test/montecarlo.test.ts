@@ -77,3 +77,24 @@ test("Monte Carlo batch: groups × seeds in one pass, percentile summary and per
   assert.equal(readFileSync(join(r.dir, "montecarlo-mc-runs.csv"), "utf8").trim().split("\n").length, 11);
   assert.ok(logs.some((l) => /^A: CAGR .* seeds beat SPY/.test(l)));
 });
+
+test("grid batch: every combination in one pass, per-run rows and a median / beat summary", async () => {
+  const { src, days } = market();
+  const out = mkdtempSync(join(tmpdir(), "bt-grid-"));
+  const r = await runBatch(src, {
+    name: "nb", from: days[260], to: days.at(-1)!, capital: 25_000, slippageBps: 10, bench: ["SPY"],
+    grid: { strategy: "rs_rsi2", params: { ...base, rank_by: "rs" }, axes: { max_positions: [2, 3], max_atr_pct: [null, 0.03] }, beat: 0.05, output: "neighborhood" },
+  }, out);
+  assert.equal(r.rows.length, 4);
+  const lines = readFileSync(join(r.dir, "neighborhood-nb.csv"), "utf8").trim().split("\n");
+  assert.equal(lines[0], "run,max_positions,max_atr_pct,cagr,max_drawdown,end_value");
+  assert.match(lines[1], /^max_positions=2 max_atr_pct=null,2,null,/);
+  assert.match(lines[4], /^max_positions=3 max_atr_pct=0\.03,3,0\.03,/);
+  const cagrs = r.rows.map((x) => x.stats.cagr);
+  const med = Number(lines.find((l) => l.startsWith("median_cagr,"))!.split(",")[1]);
+  assert.ok(Math.abs(med - percentile(cagrs, 0.5)!) < 1e-6);
+  assert.equal(lines.find((l) => l.startsWith("runs_with_cagr_above_5pct,")), `runs_with_cagr_above_5pct,${cagrs.filter((c) => c > 0.05).length}`);
+  // Same results as running one combination alone.
+  const one = await runBacktest(src, def, { ...base, rank_by: "rs", max_positions: 3, max_atr_pct: 0.03 }, { from: days[260], to: days.at(-1)!, capital: 25_000, slippageBps: 10 });
+  assert.equal(r.rows[3].stats.endValue, one.equity.at(-1)!.equity);
+});
