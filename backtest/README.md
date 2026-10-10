@@ -213,6 +213,17 @@ session counts are trading sessions. A run with
 `"requires": "sectors"` is skipped (with a note in the log) when the data has no SIC codes. A setting
 can be switched off with `null` (in JSON, `--set stop_atr=null`, or typed into the app).
 
+### CSP timing study (`batches/csp-study.json`)
+
+Would a ~0.25-delta cash-secured put have been safer on rs_rsi2 signal days? For stocks under $50 (with
+the rs_rsi2 liquidity filter and SPY above its 200-day), at each entry's close: strike = close ×
+exp(−0.67 × σ × √(21/252)), σ = annualized 30-day realized volatility. 21 sessions later: assigned if
+the close is under the strike. Compares rs_rsi2 signals (max_atr_pct 0.06) with every other stock-day in
+the top 20% by RS above its 200-day (same ATR cap, `baseline_max_atr_pct` to change). Writes
+`csp-study.csv` (per group and year: entries, assignment rate, average loss when assigned as
+(close − strike) ÷ strike, 5th-percentile and worst-5%-average outcome, median) and
+`csp-study-signals.csv` (every signal entry). Premium is not included.
+
 ## Writing a strategy
 
 Put a `.ts` file in `backtest/strategies/` (copy `strategies/example-low-vol.ts` or

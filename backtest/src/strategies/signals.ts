@@ -377,7 +377,7 @@ export const breakout = signalStrategy<Breakout>({
 });
 
 /** Return from `from_days` to `skip_days` sessions ago, per liquid name, and its percentile among them. */
-function relativeStrength<X extends { r: Row; t: Tape }>(liquid: X[], fromDays: number, skipDays: number) {
+export function relativeStrength<X extends { r: Row; t: Tape }>(liquid: X[], fromDays: number, skipDays: number) {
   const scored = liquid.map((x) => ({ x, m: x.t.n > fromDays ? x.t.close(skipDays) / x.t.close(fromDays) - 1 : NaN })).filter((y) => Number.isFinite(y.m));
   const sorted = scored.map((y) => y.m).sort((a, b) => a - b);
   return scored.map((y) => ({ ...y, pct: pctRank(sorted, y.m) }));

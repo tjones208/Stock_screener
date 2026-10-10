@@ -114,6 +114,7 @@ function savedBatches() {
     const b = readJson<{ name?: string; from?: string; to?: string; capital?: number; slippageBps?: number; bench?: string[]; runs?: { label?: string; strategy: string }[];
       montecarlo?: { seeds: number[] | { from: number; to: number }; groups: { label?: string; strategy: string }[] };
       grid?: { strategy: string; axes: Record<string, unknown[]> } } | null>(join(BATCHES, file), null);
+    if (b && (b as { csp?: unknown }).csp) b.runs = [{ strategy: "rs_rsi2", label: "CSP timing study: signal days vs other top-RS days (0.25-delta put, 21 sessions)" }];
     if (b?.grid && b.grid.axes && typeof b.grid.axes === "object") {
       const axes = Object.entries(b.grid.axes);
       const n = axes.reduce((a, [, v]) => a * (Array.isArray(v) ? v.length : 1), 1);

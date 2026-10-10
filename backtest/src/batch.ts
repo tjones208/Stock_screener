@@ -8,6 +8,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { runBacktestMany, type DataSource } from "./engine/engine.ts";
 import { STRATEGIES } from "./strategies/index.ts";
+import { cspTable, runCsp, writeCsp, type CspSpec } from "./csp.ts";
 import type { Stats, TaxRates } from "./engine/metrics.ts";
 import { grid, runOne, statsOf, sweepCsv, writeRun, type RunSpec } from "./report.ts";
 
@@ -38,6 +39,8 @@ export type BatchSpec = {
    * CAGR, max drawdown, end value) and a summary (median CAGR, runs with CAGR above `beat`).
    */
   grid?: { strategy: string; params?: Record<string, unknown>; axes: Record<string, unknown[]>; beat?: number; output?: string };
+  /** Cash-secured put timing study (src/csp.ts): writes csp-<name>.csv. */
+  csp?: CspSpec;
 };
 export type BatchEvent =
   | { type: "start"; dir: string; runs: number }
@@ -75,6 +78,7 @@ export function percentile(values: number[], q: number) {
 export async function runBatch(data: DataSource, spec: BatchSpec, resultsDir: string, emit: (e: BatchEvent) => void = () => {}) {
   if (spec.montecarlo) return runMonteCarlo(data, spec, resultsDir, emit);
   if (spec.grid) return runGrid(data, spec, resultsDir, emit);
+  if (spec.csp) return runCspBatch(data, spec, resultsDir, emit);
   const runList = spec.runs ?? [];
   const days = data.days();
   if (!days.length) throw new Error("The data set has no trading days");
@@ -247,4 +251,20 @@ async function runMonteCarlo(data: DataSource, spec: BatchSpec, resultsDir: stri
   writeFolders();
   emit({ type: "done", dir });
   return { dir, rows, bench };
+}
+
+async function runCspBatch(data: DataSource, spec: BatchSpec, resultsDir: string, emit: (e: BatchEvent) => void) {
+  const days = data.days();
+  const from = spec.from ?? days[Math.min(days.length - 1, 260)], to = spec.to ?? days[days.length - 1];
+  const name = spec.name ?? "study";
+  const dir = join(resultsDir, `${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}-csp-${slug(name)}`);
+  emit({ type: "start", dir, runs: 1 });
+  const log = (text: string) => emit({ type: "log", text });
+  log(`CSP timing study ${from} → ${to}: rs_rsi2 signal days vs other top-RS days above the 200-day…`);
+  const res = await runCsp(data, from, to, spec.csp!, log, (done, total) => emit({ type: "progress", run: 1, runs: 1, label: "CSP study", done, total }));
+  const file = writeCsp(dir, slug(name), res, spec.csp!);
+  for (const line of cspTable(res.rows).split("\n")) log(line);
+  log(`Saved ${file}`);
+  emit({ type: "done", dir });
+  return { dir, rows: [], bench: {} as Record<string, Stats> };
 }

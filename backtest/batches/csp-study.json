@@ -1,0 +1,12 @@
+{
+  "name": "study",
+  "from": "2005-01-01",
+  "to": "2018-12-31",
+  "csp": {
+    "params": { "max_atr_pct": 0.06 },
+    "max_price": 50,
+    "days": 21,
+    "vol_days": 30,
+    "z": 0.67
+  }
+}

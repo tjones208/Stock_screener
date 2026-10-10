@@ -140,11 +140,12 @@ test("max_hold_days: every time-stop exit is exactly max_hold_days sessions afte
     grid: { strategy: "rs_rsi2", params: { ...base, rank_by: "rs", max_positions: 8 }, axes: { max_hold_days: [5, 10, 15] }, output: "holdcheck" },
   }, out);
   for (const [k, n] of [5, 10, 15].entries()) {
-    const h = r.rows[k].holds;
+    const h = (r.rows[k] as unknown as { holds: import("../src/batch.ts").HoldStats }).holds;
     assert.ok(h.timeStops > 0, `hold ${n}: some time stops`);
     assert.deepEqual([h.timeStopMin, h.timeStopMax], [n, n], `hold ${n}`);
     assert.ok(h.avgSessions! <= n);
   }
   // Longer holds → fewer trades (slots turn over less often).
-  assert.ok(r.rows[0].holds.trades > r.rows[1].holds.trades && r.rows[1].holds.trades > r.rows[2].holds.trades);
+  const trades = r.rows.map((x) => (x as unknown as { holds: import("../src/batch.ts").HoldStats }).holds.trades);
+  assert.ok(trades[0] > trades[1] && trades[1] > trades[2]);
 });
