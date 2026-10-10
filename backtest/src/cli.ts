@@ -1,5 +1,5 @@
 // bt — local backtests. Run `npm run bt -- help`.
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { prepare } from "./data/prepare.ts";
@@ -11,7 +11,7 @@ import { loadStrategies } from "./strategies/index.ts";
 import { grid, statsLine } from "./report.ts";
 import { runBatch, type BatchEvent, type BatchSpec } from "./batch.ts";
 import { loadEnv } from "./env.ts";
-import { batchSummaryCsv, runStudy, studyTable, writeStudy } from "./study.ts";
+import { batchSummaryCsv, runStudy, studyCsv, studyTable, writeStudy } from "./study.ts";
 
 const HELP = `bt — backtests on Massive flat files with the app's strategy rules
 
@@ -130,6 +130,10 @@ async function main() {
       const out = resolve(a.out ?? "results");
       const data = await ParquetSource.open(resolve(a.data), { where: a.where });
       const done: { name: string; dir: string; result: Awaited<ReturnType<typeof runStudy>>["result"] }[] = [];
+      // A batch also collects every study as study-<name>.json / .csv in one folder.
+      const fileName = (s: string) => s.replace(/[^A-Za-z0-9_-]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 40) || "study";
+      const batchDir = batch ? join(out, "studies", `${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}-${fileName(batch.name || "batch")}`) : null;
+      if (batchDir) mkdirSync(batchDir, { recursive: true });
       try {
         for (const [k, it] of items.entries()) {
           const def = strategies[it.strategy];
@@ -141,12 +145,17 @@ async function main() {
             (d, total) => progress(d, total, `${items.length > 1 ? `${k + 1}/${items.length} ` : ""}${def.name}`));
           const dir = writeStudy(out, result, signals);
           done.push({ name: it.name || def.name, dir, result });
+          if (batchDir) {
+            const base = `study-${fileName(it.name || def.name)}`;
+            writeFileSync(join(batchDir, `${base}.json`), JSON.stringify(result, null, 2));
+            writeFileSync(join(batchDir, `${base}.csv`), studyCsv(result));
+            log(`Saved ${join(batchDir, base)}.json and .csv`);
+          }
           for (const line of studyTable(result).split("\n")) log(line);
           log(`Signals without a next-day bar: ${result.noEntry.signals}; returns past the end of the data: ${result.incomplete}.`);
         }
         if (batch) {
-          const stamp = done[0].result.created.replace(/[:.]/g, "-").slice(0, 19);
-          const file = join(out, "studies", `${stamp}-${(batch.name || "batch").replace(/[^A-Za-z0-9_.=-]+/g, "_").slice(0, 50)}-summary.csv`);
+          const file = join(batchDir!, "summary.csv");
           writeFileSync(file, batchSummaryCsv(done.map((x) => ({ name: x.name, result: x.result }))));
           log(`Batch summary (all years): ${file}`);
         }

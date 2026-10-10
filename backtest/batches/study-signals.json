@@ -1,0 +1,11 @@
+{
+  "name": "signals",
+  "from": "2005-01-01",
+  "to": "2018-12-31",
+  "cost": 0.002,
+  "studies": [
+    { "strategy": "gap_drift", "name": "gap_drift", "horizons": [5, 10, 20, 40] },
+    { "strategy": "etf_rsi2", "name": "etf_rsi2", "horizons": [3, 5, 10] },
+    { "strategy": "lc_reversal", "name": "lc_reversal", "horizons": [5, 10] }
+  ]
+}

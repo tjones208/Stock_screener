@@ -185,6 +185,12 @@ SPY above its 200-day average; as backtests they buy every signal equal-weight a
   a stock without one is its own sector).
   `rank_by: "random"` shuffles the day's signals with a generator keyed to `seed` and the date, so a
   seed always replays the same picks.
+- `gap_drift`: opens ≥ 5% above the prior close on ≥ 3× its prior 50-day average volume and closes in the
+  top half of the day's range; price over $10, liquidity filter, no market filter (horizons 5, 10, 20, 40).
+- `etf_rsi2`: SPY, QQQ and the sector SPDRs only (`tickers`); RSI(2) < 10 above the 200-day; baseline is
+  the same ETFs every day (horizons 3, 5, 10).
+- `lc_reversal`: the top 500 by 50-day average dollar volume each day; bottom 5% by 5-day return with the
+  close above the 200-day; baseline is the same 500 (horizons 5, 10).
 - `rs_leaders`: top 10% of the liquid universe by return from 126 to 21 sessions ago, on the first
   trading day of each week only (horizons 10, 20, 40, 60).
 
@@ -192,7 +198,9 @@ Every study also reports cost-adjusted returns: each signal's return minus a cos
 0.20%, round-trip slippage; `--cost 0.20`), and the edge after cost over the universe. Several studies
 run as one job with **Add to batch → Run batch** in the app, or `bt study --spec studies.json`
 (`{"name", "from", "to", "cost": 0.002, "studies": [{"strategy", "params", "horizons", "name"}]}`),
-which also writes `<stamp>-<name>-summary.csv` (each study's all-years row, one line per horizon).
+which also writes `studies/<stamp>-<name>/` with `study-<study>.json` / `.csv` per study and
+`summary.csv` (each study's all-years row, one line per horizon). Study batch files in `batches/`
+(e.g. `study-signals.json`) run from the Saved batches card.
 
 ### Saved batches
 

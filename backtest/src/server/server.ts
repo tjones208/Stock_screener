@@ -114,6 +114,8 @@ function savedBatches() {
     const b = readJson<{ name?: string; from?: string; to?: string; capital?: number; slippageBps?: number; bench?: string[]; runs?: { label?: string; strategy: string }[];
       montecarlo?: { seeds: number[] | { from: number; to: number }; groups: { label?: string; strategy: string }[] };
       grid?: { strategy: string; axes: Record<string, unknown[]> } } | null>(join(BATCHES, file), null);
+    const st = b && (b as { studies?: { strategy: string; name?: string; horizons?: number[] }[] }).studies;
+    if (b && Array.isArray(st)) { b.runs = st.map((x) => ({ strategy: x.strategy, label: `study ${x.name || x.strategy}${x.horizons ? ` (${x.horizons.join("/")})` : ""}` })); return { file, kind: "study", name: b.name ?? file, from: b.from ?? null, to: b.to ?? null, capital: null, slippageBps: null, bench: [], runs: b.runs.map((r) => r.label ?? r.strategy) }; }
     if (b && (b as { csp?: unknown }).csp) b.runs = [{ strategy: "rs_rsi2", label: "CSP timing study: signal days vs other top-RS days (0.25-delta put, 21 sessions)" }];
     if (b?.grid && b.grid.axes && typeof b.grid.axes === "object") {
       const axes = Object.entries(b.grid.axes);
@@ -275,7 +277,9 @@ export async function startServer(o: { port?: number; open?: boolean; host?: str
           case "saved-batch": {
             const sb = savedBatches().find((x) => x.file === b.file && !("error" in x));
             if (!sb || "error" in sb) throw new Error("That batch file isn't in the batches folder.");
-            job = queue.add("batch", `${sb.name} (${sb.runs.length} runs)`, ["batch", "--data", need(f.data, "prepared data"), "--spec", join(BATCHES, sb.file), "--out", f.results]);
+            job = "kind" in sb && sb.kind === "study"
+              ? queue.add("study", `Study batch: ${sb.name} (${sb.runs.length})`, ["study", "--data", need(f.data, "prepared data"), "--spec", join(BATCHES, sb.file), "--out", f.results])
+              : queue.add("batch", `${sb.name} (${sb.runs.length} runs)`, ["batch", "--data", need(f.data, "prepared data"), "--spec", join(BATCHES, sb.file), "--out", f.results]);
             break;
           }
           case "study-batch": {

@@ -109,6 +109,8 @@ type Spec<P extends Filters> = {
   smas: (p: P) => number[];
   /** Today's signals among the liquid names, in the order to buy them. `ma` holds the ticker's averages in `smas` order. */
   signals: (ctx: Ctx, liquid: Liquid[], p: P) => string[];
+  /** Narrow the day's universe after the liquidity filter (e.g. a fixed ETF list, or the top N by dollar volume). */
+  restrict?: (ctx: Ctx, liquid: Liquid[], p: P) => Liquid[];
 };
 
 /** Per-ticker histories, today's liquid universe and the market filter, shared by both executors. */
@@ -131,12 +133,13 @@ function scanner<P extends Filters>(spec: Spec<P>, p: P, extraBars = 0) {
       }
       const liquid: Liquid[] = [];
       for (const r of ctx.today.values()) {
-        if (r.ticker === p.market_ticker || r.c < p.min_price) continue;
+        if ((p.use_market_filter && r.ticker === p.market_ticker) || r.c < p.min_price) continue;
         if (p.common_only) { const type = ctx.tickers.get(r.ticker)?.type; if (type && type !== "CS") continue; }
         const x = tapes.get(r.ticker)!;
         if (!(x.t.mean("dv", p.dollar_vol_lookback) >= p.min_avg_dollar_vol)) continue;
         liquid.push({ r, t: x.t, ma: x.ma.slice(0, nSma) });
       }
+      if (spec.restrict) { const kept = spec.restrict(ctx, liquid, p); liquid.length = 0; liquid.push(...kept); }
       liquidToday = liquid.map((x) => x.r.ticker);
       let riskOn = true;
       if (p.use_market_filter) {
@@ -459,5 +462,83 @@ export const rsLeaders = signalStrategy<RsLeaders>({
     // First trading day of the week: the previous session closed a week.
     if (ctx.i === 0 || !isWeekEnd(ctx.cal, ctx.days[ctx.i - 1])) return [];
     return relativeStrength(liquid, p.from_days, p.skip_days).filter((y) => y.pct > 1 - p.top_pct).sort((a, b) => b.m - a.m).map((y) => y.x.r.ticker);
+  },
+});
+
+type GapDrift = Base & { gap_pct: number; vol_days: number; vol_mult: number; close_in_range: number };
+export const gapDrift = signalStrategy<GapDrift>({
+  name: "gap_drift",
+  description: "Signal study: opens ≥ 5% above the prior close on ≥ 3× its 50-day average volume and closes in the top half of the day's range; price over $10, liquidity filter.",
+  defaults: { gap_pct: 0.05, vol_days: 50, vol_mult: 3, close_in_range: 0.5, use_market_filter: false, hold_days: 10 },
+  fields: [
+    { key: "gap_pct", label: "Open ≥ prior close × (1 + this)", group: "Signal" },
+    { key: "vol_days", label: "Volume average (prior days)", group: "Signal" },
+    { key: "vol_mult", label: "Volume ≥ × average", group: "Signal" },
+    { key: "close_in_range", label: "Close in the top part of the range (0.5 = top half)", group: "Signal" },
+  ],
+  studyHorizons: [5, 10, 20, 40],
+  bars: (p) => p.vol_days + 2,
+  smas: () => [],
+  signals: (_ctx, liquid, p) => liquid
+    .filter(({ r, t }) => {
+      if (!(r.c > p.min_price) || t.n < 2) return false;
+      const pc = t.close(1), avgV = t.mean("v", p.vol_days, 1);
+      return r.o >= pc * (1 + p.gap_pct) && r.v >= p.vol_mult * avgV && r.h > r.l && (r.c - r.l) / (r.h - r.l) >= p.close_in_range;
+    })
+    .sort((a, b) => b.r.o / b.t.close(1) - a.r.o / a.t.close(1))
+    .map((x) => x.r.ticker),
+});
+
+type EtfRsi2 = Base & { tickers: string; rsi_max: number; trend_ma: number };
+export const etfRsi2 = signalStrategy<EtfRsi2>({
+  name: "etf_rsi2",
+  description: "Signal study: SPY, QQQ and the sector SPDRs with 2-day RSI (Wilder) under 10 and the close above the 200-day average. Baseline: the same ETFs on every day.",
+  defaults: {
+    tickers: "SPY,QQQ,XLB,XLC,XLE,XLF,XLI,XLK,XLP,XLRE,XLU,XLV,XLY", rsi_max: 10, trend_ma: 200,
+    min_price: 0, min_avg_dollar_vol: 0, common_only: false, use_market_filter: false, market_ticker: "", hold_days: 5,
+  },
+  fields: [
+    { key: "tickers", label: "ETFs (comma-separated)", group: "Signal" },
+    { key: "rsi_max", label: "RSI(2) under", group: "Signal" },
+    { key: "trend_ma", label: "Close above MA (days)", group: "Signal" },
+  ],
+  studyHorizons: [3, 5, 10],
+  bars: (p) => p.trend_ma,
+  smas: (p) => [p.trend_ma],
+  restrict: (_ctx, liquid, p) => { const set = new Set(String(p.tickers).split(",").map((x) => x.trim().toUpperCase()).filter(Boolean)); return liquid.filter((x) => set.has(x.r.ticker)); },
+  signals: (_ctx, liquid, p) => liquid
+    .filter(({ r, t, ma: [m] }) => t.rsi < p.rsi_max && r.c > m)
+    .sort((a, b) => a.t.rsi - b.t.rsi)
+    .map((x) => x.r.ticker),
+});
+
+type LcReversal = Base & { top_n: number; adv_days: number; ret_days: number; bottom_pct: number; trend_ma: number };
+export const lcReversal = signalStrategy<LcReversal>({
+  name: "lc_reversal",
+  description: "Signal study: among the 500 stocks with the highest 50-day average dollar volume, the bottom 5% by 5-day return with the close above the 200-day average. Baseline: the same 500 stocks.",
+  defaults: { top_n: 500, adv_days: 50, ret_days: 5, bottom_pct: 0.05, trend_ma: 200, min_price: 0, min_avg_dollar_vol: 0, use_market_filter: false, hold_days: 5 },
+  fields: [
+    { key: "top_n", label: "Universe: top N by average dollar volume", group: "Signal" },
+    { key: "adv_days", label: "Dollar-volume average (days)", group: "Signal" },
+    { key: "ret_days", label: "Return over (sessions)", group: "Signal" },
+    { key: "bottom_pct", label: "Bottom fraction (0.05 = bottom 5%)", group: "Signal" },
+    { key: "trend_ma", label: "Close above MA (days)", group: "Signal" },
+  ],
+  studyHorizons: [5, 10],
+  bars: (p) => Math.max(p.trend_ma, p.adv_days, p.ret_days + 1),
+  smas: (p) => [p.trend_ma],
+  restrict: (_ctx, liquid, p) => liquid
+    .map((x) => ({ x, adv: x.t.mean("dv", p.adv_days) }))
+    .filter((y) => Number.isFinite(y.adv))
+    .sort((a, b) => b.adv - a.adv || a.x.r.ticker.localeCompare(b.x.r.ticker))
+    .slice(0, p.top_n)
+    .map((y) => y.x),
+  signals: (_ctx, liquid, p) => {
+    const scored = liquid.map((x) => ({ x, ret: x.t.n > p.ret_days ? x.r.c / x.t.close(p.ret_days) - 1 : NaN })).filter((y) => Number.isFinite(y.ret));
+    const sorted = scored.map((y) => y.ret).sort((a, b) => a - b);
+    return scored
+      .filter((y) => pctRank(sorted, y.ret) <= p.bottom_pct && y.x.r.c > y.x.ma[0])
+      .sort((a, b) => a.ret - b.ret)
+      .map((y) => y.x.r.ticker);
   },
 });

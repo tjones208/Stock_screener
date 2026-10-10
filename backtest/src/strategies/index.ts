@@ -9,9 +9,9 @@ import { smaTiming } from "./sma-timing.ts";
 import { topN } from "./topn.ts";
 import { momentum } from "./momentum.ts";
 import { pullback } from "./pullback.ts";
-import { breakout, rsi2, rsi2Deep, rsLeaders, rsRsi2 } from "./signals.ts";
+import { breakout, etfRsi2, gapDrift, lcReversal, rsi2, rsi2Deep, rsLeaders, rsRsi2 } from "./signals.ts";
 
-export const BUILT_IN: StrategyDef[] = [buyHold, smaTiming, topN, momentum, pullback, breakout, rsi2, rsi2Deep, rsRsi2, rsLeaders] as unknown as StrategyDef[];
+export const BUILT_IN: StrategyDef[] = [buyHold, smaTiming, topN, momentum, pullback, breakout, rsi2, rsi2Deep, rsRsi2, rsLeaders, gapDrift, etfRsi2, lcReversal] as unknown as StrategyDef[];
 export const STRATEGIES: Record<string, StrategyDef> = Object.fromEntries(BUILT_IN.map((s) => [s.name, s]));
 
 /** Folder for your own strategy files. */
