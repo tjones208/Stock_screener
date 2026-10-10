@@ -178,7 +178,8 @@ export function studyTable(r: StudyResult) {
     `Net = signal return minus ${(r.cost * 100).toFixed(2)}% cost; NetEdge = Net minus the universe.`].join("\n");
 }
 
-const slug = (s: string) => s.replace(/[^A-Za-z0-9_.=-]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 60) || "study";
+// Folder names: letters, digits, "-" and "_" only, kept short (Windows rejects some characters and long paths).
+const slug = (s: string) => s.replace(/[^A-Za-z0-9_-]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 40).replace(/_+$/, "") || "study";
 
 export function writeStudy(resultsDir: string, r: StudyResult, signals: Item[]) {
   const stamp = r.created.replace(/[:.]/g, "-").slice(0, 19);

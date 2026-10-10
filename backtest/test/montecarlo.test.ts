@@ -98,3 +98,36 @@ test("grid batch: every combination in one pass, per-run rows and a median / bea
   const one = await runBacktest(src, def, { ...base, rank_by: "rs", max_positions: 3, max_atr_pct: 0.03 }, { from: days[260], to: days.at(-1)!, capital: 25_000, slippageBps: 10 });
   assert.equal(r.rows[3].stats.endValue, one.equity.at(-1)!.equity);
 });
+
+test("batch folders: plain short names; a folder that can't be written doesn't lose the summary", async () => {
+  const { src, days } = market();
+  const out = mkdtempSync(join(tmpdir(), "bt-names-"));
+  const logs: string[] = [];
+  const r = await runBatch(src, {
+    name: "nb", from: days[260], to: days.at(-1)!, capital: 25_000, slippageBps: 10, bench: [],
+    grid: { strategy: "rs_rsi2", params: { ...base, rank_by: "rs" }, axes: { max_positions: [2, 3], max_atr_pct: [null, 0.035] }, output: "neighborhood" },
+  }, out, (e) => { if (e.type === "log") logs.push(e.text); });
+  for (const row of r.rows) assert.match(row.folder, /^run-\d{3}-[A-Za-z0-9_-]{1,40}$/, row.folder);
+  assert.equal(r.rows[3].folder, "run-004-max_positions_3_max_atr_pct_0_035");
+  // Block one run folder with a file of the same name: the batch still finishes and logs it.
+  const { writeFileSync, existsSync } = await import("node:fs");
+  const out2 = mkdtempSync(join(tmpdir(), "bt-block-"));
+  const orig = Date.prototype.toISOString;
+  Date.prototype.toISOString = function () { return "2030-01-01T00:00:00.000Z"; };
+  try {
+    const { mkdirSync } = await import("node:fs");
+    mkdirSync(join(out2, "2030-01-01T00-00-00-nb"), { recursive: true });
+    writeFileSync(join(out2, "2030-01-01T00-00-00-nb", "run-001-max_positions_2_max_atr_pct_null"), "not a folder");
+    const logs2: string[] = [];
+    const r2 = await runBatch(src, {
+      name: "nb", from: days[260], to: days.at(-1)!, capital: 25_000, slippageBps: 10, bench: [],
+      grid: { strategy: "rs_rsi2", params: { ...base, rank_by: "rs" }, axes: { max_positions: [2, 3] , max_atr_pct: [null] }, output: "neighborhood" },
+    }, out2, (e) => { if (e.type === "log") logs2.push(e.text); });
+    assert.ok(existsSync(join(r2.dir, "neighborhood-nb.csv")));
+    assert.ok(logs2.some((l) => /Couldn't write the folder .*run-001/.test(l)));
+    assert.ok(logs2.some((l) => /1 of 2 run folders couldn't be written/.test(l)));
+    assert.ok(existsSync(join(r2.dir, "run-002-max_positions_3_max_atr_pct_null", "trades.csv")));
+  } finally {
+    Date.prototype.toISOString = orig;
+  }
+});
