@@ -148,6 +148,12 @@ function renderData() {
           <label class="field">Memory<input id="prepMem" value="${esc(s.settings.prepare.memory)}" style="width:80px"/></label></div>
           <div class="row"><button class="btn primary" data-job="prepare">Prepare</button></div>
           <div>${jobLine("prepare")}</div></div>
+        <div class="step"><div><span class="n">4</span><b>Earnings dates (SEC EDGAR)</b> <span class="small muted">optional</span></div>
+          <div class="small muted">For the earnings drift study: every 8-K with item 2.02 for each company (delisted ones included, via the CIKs in step 2's reference data).
+            SEC requires a contact email with each request and at most 10 requests a second; this uses 8. About an hour the first time; it resumes if stopped.</div>
+          <label class="field">Your contact email (sent to SEC only)<input id="secEmail" value="${esc(s.settings.sec?.email || "")}" placeholder="you@example.com" style="width:240px"/></label>
+          <div class="row"><button class="btn" data-job="fetch-earnings">Download earnings dates</button></div>
+          <div>${jobLine("fetch-earnings")}</div></div>
       </div>
     </div>`;
   for (const [k] of FOLDERS) checkFolder(k, f[k]);
@@ -164,6 +170,7 @@ function renderData() {
   $("#demo").onclick = () => startJob({ kind: "demo" });
   root.querySelectorAll("[data-job]").forEach((b) => b.addEventListener("click", async () => {
     if (b.dataset.job === "prepare") await api("/api/settings", { method: "POST", body: { prepare: { from: $("#prepFrom").value.trim(), memory: $("#prepMem").value.trim() || "8GB" } } });
+    if (b.dataset.job === "fetch-earnings") await api("/api/settings", { method: "POST", body: { sec: { email: $("#secEmail").value.trim() } } });
     startJob({ kind: b.dataset.job, details: $("#details")?.checked });
   }));
 }
@@ -610,7 +617,14 @@ async function renderStudy(root) {
     </div>
     <div class="card"><h3>Share of positive returns</h3><div class="tablewrap"><table class="study"><thead><tr><th class="l">Year</th>${head("Signal")}${hasNet ? head("Cost-adj.") : ""}${head("Universe")}</tr></thead>
       <tbody>${body((r) => `${r.sigWin.map((x) => `<td>${pct(x, 0)}</td>`).join("")}${hasNet ? r.netWin.map((x) => `<td>${pct(x, 0)}</td>`).join("") : ""}${r.baseWin.map((x) => `<td>${pct(x, 0)}</td>`).join("")}`)}</tbody></table></div>
-      <p class="small muted">${num(s.noEntry?.signals, 0)} signals had no bar the next day and were left out. Every signal's returns are in signals.csv in the folder.</p></div>`;
+      <p class="small muted">${num(s.noEntry?.signals, 0)} signals had no bar the next day and were left out. Every signal's returns are in signals.csv in the folder.</p></div>
+    ${(() => {
+      const groups = [...new Set(s.rows.flatMap((r) => Object.keys(r.extra || {})))];
+      if (!groups.length) return "";
+      return `<div class="card"><h3>More groups</h3><p class="small muted">Average return from the entry open to the close of session N, per group (the "minus" rows are differences).</p>
+        ${groups.map((g) => `<h4 style="margin:12px 0 6px">${esc(g.replace(/_/g, " "))}</h4><div class="tablewrap"><table class="study"><thead><tr><th class="l">Year</th><th>Count</th>${head("Avg")}</tr></thead>
+          <tbody>${body((r) => `<td>${num(r.extra?.[g]?.n, 0)}</td>${(r.extra?.[g]?.avg || []).map((x) => cell(x, g.includes("minus"))).join("")}`)}</tbody></table></div>`).join("")}</div>`;
+    })()}`;
   $("#stBack").onclick = () => { S.study = null; renderStudies(); };
   $("#stOpen").onclick = () => api("/api/open", { method: "POST", body: { path: s.path } });
 }

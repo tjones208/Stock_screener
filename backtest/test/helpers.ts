@@ -15,7 +15,9 @@ export class MemorySource implements DataSource {
   private byDay = new Map<string, Map<string, Row>>();
   private divs = new Map<string, Dividend[]>();
   private tk = new Map<string, TickerInfo>();
-  constructor(rows: Row[], divs: Dividend[] = []) {
+  private ern: { ticker: string; filing_date: string }[];
+  constructor(rows: Row[], divs: Dividend[] = [], earnings: { ticker: string; filing_date: string }[] = []) {
+    this.ern = earnings;
     for (const r of rows) {
       if (!this.byDay.has(r.d)) this.byDay.set(r.d, new Map());
       this.byDay.get(r.d)!.set(r.ticker, r);
@@ -24,6 +26,7 @@ export class MemorySource implements DataSource {
     for (const d of divs) this.divs.set(d.ex_date, [...(this.divs.get(d.ex_date) ?? []), d]);
   }
   days() { return [...this.byDay.keys()].sort(); }
+  async earnings() { return this.ern; }
   tickers() { return this.tk; }
   dividends() { return this.divs; }
   async rows(from: string, to: string) {

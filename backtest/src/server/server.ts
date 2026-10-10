@@ -18,6 +18,8 @@ type Settings = {
   folders: { dayCsv: string; minuteCsv: string; dayParquet: string; minuteParquet: string; ref: string; data: string; results: string };
   run: { from: string; to: string; capital: number; slippageBps: number; commission: number; taxSt: number; taxLt: number; bench: string };
   prepare: { from: string; memory: string };
+  /** Contact email for SEC EDGAR requests (their rules require one in the User-Agent). */
+  sec: { email: string };
 };
 type Preset = { id: string; name: string; strategy: string; params: Record<string, unknown>; sweep?: Record<string, string> };
 
@@ -25,6 +27,7 @@ const defaults = (): Settings => ({
   folders: { dayCsv: "", minuteCsv: "", dayParquet: "", minuteParquet: "", ref: "", data: join(BT_ROOT, "data", "bt"), results: join(BT_ROOT, "results") },
   run: { from: "", to: "", capital: 20000, slippageBps: 10, commission: 0, taxSt: 0.3, taxLt: 0.15, bench: "SPY,MTUM" },
   prepare: { from: "", memory: "8GB" },
+  sec: { email: "" },
 });
 const readJson = <T>(f: string, fallback: T): T => { try { return existsSync(f) ? (JSON.parse(readFileSync(f, "utf8")) as T) : fallback; } catch { return fallback; } };
 /**
@@ -38,7 +41,7 @@ const cleanFolders = (f: Partial<Settings["folders"]> = {}) =>
 const loadSettings = (): Settings => {
   const s = readJson<Partial<Settings>>(SETTINGS, {});
   const d = defaults();
-  return { folders: { ...d.folders, ...cleanFolders(s.folders) }, run: { ...d.run, ...s.run }, prepare: { ...d.prepare, ...s.prepare } };
+  return { folders: { ...d.folders, ...cleanFolders(s.folders) }, run: { ...d.run, ...s.run }, prepare: { ...d.prepare, ...s.prepare }, sec: { ...d.sec, ...s.sec } };
 };
 
 function send(res: ServerResponse, code: number, body: unknown, type = "application/json") {
@@ -203,7 +206,7 @@ export async function startServer(o: { port?: number; open?: boolean; host?: str
       }
       if (p === "/api/settings" && req.method === "POST") {
         const b = (await body(req)) as Partial<Settings>;
-        const next: Settings = { folders: { ...settings.folders, ...cleanFolders(b.folders) }, run: { ...settings.run, ...b.run }, prepare: { ...settings.prepare, ...b.prepare } };
+        const next: Settings = { folders: { ...settings.folders, ...cleanFolders(b.folders) }, run: { ...settings.run, ...b.run }, prepare: { ...settings.prepare, ...b.prepare }, sec: { ...settings.sec, ...b.sec } };
         writeFileSync(SETTINGS, JSON.stringify(next, null, 2));
         return send(res, 200, next);
       }
@@ -251,6 +254,12 @@ export async function startServer(o: { port?: number; open?: boolean; host?: str
             if (!process.env.MASSIVE_API_KEY) throw new Error("Save your Massive API key first (Data tab).");
             job = queue.add("fetch-ref", "Download reference data", ["fetch-ref", "--out", need(f.ref, "reference"), ...(b.details ? ["--details"] : []), "--rps", String(b.rps ?? 20)]);
             break;
+          case "fetch-earnings": {
+            const email = String(settings.sec?.email ?? "").trim();
+            if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new Error("Enter your contact email for SEC requests first (Data tab, step 4).");
+            job = queue.add("fetch-earnings", "Download earnings dates (SEC EDGAR)", ["fetch-earnings", "--ref", need(f.ref, "reference"), "--data", need(f.data, "prepared data"), "--email", email]);
+            break;
+          }
           case "prepare": {
             const src = f.dayParquet && existsSync(f.dayParquet) && folderInfo(f.dayParquet).parquetFiles ? f.dayParquet : need(f.dayCsv, "daily CSV or Parquet");
             job = queue.add("prepare", "Prepare backtest data", ["prepare", "--flat", src, "--data", need(f.data, "prepared data"), ...(f.ref ? ["--ref", f.ref] : []),

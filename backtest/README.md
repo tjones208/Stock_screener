@@ -221,6 +221,25 @@ session counts are trading sessions. A run with
 `"requires": "sectors"` is skipped (with a note in the log) when the data has no SIC codes. A setting
 can be switched off with `null` (in JSON, `--set stop_atr=null`, or typed into the app).
 
+### Earnings dates (SEC EDGAR) and the earnings drift study
+
+`bt fetch-earnings --ref <ref> --data <prepared> --email you@example.com` (Data tab, step 4) maps
+tickers to CIKs (the CIK on each Massive reference ticker, delisted ones included, then SEC's
+`company_tickers.json`), reads each company's `submissions/CIK##########.json` plus the older filing
+files it lists (back to 2003), and keeps every 8-K whose items include 2.02; the filing date is the
+earnings date. A reused ticker gets each company's filings up to that listing's delisting. Uses a
+User-Agent with your email and 8 requests a second (SEC allows 10); resumable. Writes
+`<ref>/earnings_dates.csv`, `<data>/earnings_dates.parquet` (ticker, cik, filing_date; Prepare also
+copies it) and `<ref>/earnings_coverage.csv` (tickers matched, events per year).
+
+`batches/study-earnings_drift.json` (Studies: strategy `earnings_drift`): reaction = close on the
+session after the filing ÷ close on the session before − 1; events with price over $10 and the
+liquidity filter; entry at the open two sessions after the filing; horizons 5–60. Signal = top 10% of
+reactions, `bottom` = bottom 10%, `all_events` = baseline A, the universe on signal days = baseline B.
+`rank_window: "quarter"` ranks within the calendar quarter (as specified; uses later reactions in the
+quarter), `"trailing"` against the previous 63 sessions only (tradable). Writes study-<name>.json /
+.csv / -events.csv.
+
 ### CSP timing study (`batches/csp-study.json`)
 
 Would a ~0.25-delta cash-secured put have been safer on rs_rsi2 signal days? For stocks under $50 (with

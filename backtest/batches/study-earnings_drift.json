@@ -1,0 +1,10 @@
+{
+  "name": "earnings",
+  "from": "2005-01-01",
+  "to": "2018-12-31",
+  "cost": 0.002,
+  "studies": [
+    { "strategy": "earnings_drift", "name": "earnings_drift", "horizons": [5, 10, 20, 40, 60], "params": { "rank_window": "quarter" } },
+    { "strategy": "earnings_drift", "name": "earnings_drift_trailing", "horizons": [5, 10, 20, 40, 60], "params": { "rank_window": "trailing", "trailing_days": 63 } }
+  ]
+}

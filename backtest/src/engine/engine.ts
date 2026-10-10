@@ -14,6 +14,8 @@ export interface DataSource {
   tickers(): Map<string, TickerInfo>;
   /** Dividends keyed by ex-date. */
   dividends(): Map<string, Dividend[]>;
+  /** Earnings filing dates (bt fetch-earnings), if the data set has them. */
+  earnings?(): Promise<{ ticker: string; filing_date: string }[]>;
 }
 
 export type Ctx = {

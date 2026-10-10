@@ -12,6 +12,8 @@ import { grid, statsLine } from "./report.ts";
 import { runBatch, type BatchEvent, type BatchSpec } from "./batch.ts";
 import { loadEnv } from "./env.ts";
 import { batchSummaryCsv, runStudy, studyCsv, studyTable, writeStudy } from "./study.ts";
+import { runEarningsStudy } from "./earnings-study.ts";
+import { fetchEarnings } from "./data/fetch-earnings.ts";
 
 const HELP = `bt — backtests on Massive flat files with the app's strategy rules
 
@@ -28,7 +30,9 @@ const HELP = `bt — backtests on Massive flat files with the app's strategy rul
   bt batch      --data <dir> --spec batch.json [--out results]   several strategies / settings in one batch
   bt study      --data <dir> --strategy pullback [--from] [--to] [--horizons 5,10,15] [--set key=value ...] [--cost 0.20] [--out results]
                 every signal's forward return vs the strategy's universe on the same days, by year (--cost: % per signal)
-  bt study      --data <dir> --spec studies.json         several studies in one batch
+  bt study      --data <dir> --spec studies.json         several studies in one batch (strategy "earnings_drift" = the earnings study)
+  bt fetch-earnings --ref <ref dir> [--data <prepared dir>] --email you@example.com [--rps 8] [--from 2003-01-01]
+                                                             earnings dates from SEC EDGAR (8-K item 2.02) → earnings_dates.parquet
   Add --events to print progress as JSON lines (used by the app).
 `;
 
@@ -52,7 +56,7 @@ async function main() {
       set: { type: "string", multiple: true }, grid: { type: "string", multiple: true },
       "slippage-bps": { type: "string", default: "10" }, commission: { type: "string", default: "0" },
       bench: { type: "string", default: "SPY,MTUM" }, tax: { type: "string", default: "0.30,0.15" },
-      where: { type: "string" }, name: { type: "string" }, spec: { type: "string" }, horizons: { type: "string" }, cost: { type: "string" },
+      where: { type: "string" }, name: { type: "string" }, spec: { type: "string" }, horizons: { type: "string" }, cost: { type: "string" }, email: { type: "string" },
       src: { type: "string" }, dest: { type: "string" }, group: { type: "string" }, force: { type: "boolean" },
       events: { type: "boolean" }, port: { type: "string" }, "no-open": { type: "boolean" },
     },
@@ -120,11 +124,13 @@ async function main() {
       if (!a.data) throw new Error("study needs --data (a folder made by bt prepare)");
       const { strategies, errors } = await loadStrategies();
       for (const e of errors) log(`Strategy file ${e.file} not loaded: ${e.error}`);
+      // strategy "earnings_drift" is the earnings study (src/earnings-study.ts); its params are EarningsSpec settings.
       type Item = { strategy: string; params?: Record<string, unknown>; horizons?: number[]; name?: string };
+      const isEarnings = (it: Item) => it.strategy === "earnings_drift";
       const batch = a.spec ? (JSON.parse(readFileSync(resolve(a.spec), "utf8")) as { name?: string; from?: string; to?: string; cost?: number; studies: Item[] }) : null;
       const items: Item[] = batch?.studies ?? [{ strategy: a.strategy, params: kv(a.set), horizons: a.horizons ? a.horizons.split(",").map(Number).filter((x) => x > 0) : undefined, name: a.name }];
       if (!items.length) throw new Error("The study batch is empty");
-      for (const it of items) if (!strategies[it.strategy]) throw new Error(`Unknown strategy "${it.strategy}"`);
+      for (const it of items) if (!isEarnings(it) && !strategies[it.strategy]) throw new Error(`Unknown strategy "${it.strategy}"`);
       const from = batch?.from || a.from, to = batch?.to || a.to;
       const cost = batch?.cost ?? (a.cost != null ? Number(a.cost) / 100 : 0.002);
       const out = resolve(a.out ?? "results");
@@ -136,6 +142,26 @@ async function main() {
       if (batchDir) mkdirSync(batchDir, { recursive: true });
       try {
         for (const [k, it] of items.entries()) {
+          if (isEarnings(it)) {
+            const name = batch ? `${batch.name || "Study batch"} · ${it.name || "earnings_drift"}` : it.name || "earnings_drift";
+            const p = it.params ?? {};
+            log(`${items.length > 1 ? `[${k + 1}/${items.length}] ` : ""}Earnings drift study (${p.rank_window ?? "quarter"} ranking), ${from ?? "start"} → ${to ?? "end"}, cost ${(cost * 100).toFixed(2)}%`);
+            const r = await runEarningsStudy(data, { ...p, name, from, to, horizons: it.horizons, cost }, log,
+              (d, total) => progress(d, total, `${items.length > 1 ? `${k + 1}/${items.length} ` : ""}earnings_drift`));
+            r.result.batch = batch ? batch.name || "Study batch" : null;
+            const dir = writeStudy(out, r.result, r.signals);
+            writeFileSync(join(dir, "earnings_events.csv"), r.eventsCsv());
+            done.push({ name: it.name || "earnings_drift", dir, result: r.result });
+            if (batchDir) {
+              const base = `study-${fileName(it.name || "earnings_drift")}`;
+              writeFileSync(join(batchDir, `${base}.json`), JSON.stringify(r.result, null, 2));
+              writeFileSync(join(batchDir, `${base}.csv`), studyCsv(r.result));
+              writeFileSync(join(batchDir, `${base}-events.csv`), r.eventsCsv());
+              log(`Saved ${join(batchDir, base)}.json, .csv and -events.csv`);
+            }
+            for (const line of studyTable(r.result).split("\n")) log(line);
+            continue;
+          }
           const def = strategies[it.strategy];
           const params = it.params ?? {};
           const horizons = it.horizons?.length ? it.horizons : def.studyHorizons ?? [5, 10, 15];
@@ -163,6 +189,12 @@ async function main() {
       } finally {
         data.close();
       }
+      return;
+    }
+    case "fetch-earnings": {
+      if (!a.ref) throw new Error("fetch-earnings needs --ref (the reference data folder with tickers.jsonl)");
+      const email = a.email ?? process.env.SEC_EMAIL ?? "";
+      await fetchEarnings({ ref: resolve(a.ref), data: a.data ? resolve(a.data) : undefined, email, rps: a.rps ? Number(a.rps) : undefined, since: a.from, log, onProgress: (d, t) => progress(d, t, "SEC filings") });
       return;
     }
     default:

@@ -58,5 +58,12 @@ export class ParquetSource implements DataSource {
     return out;
   }
 
+  /** Earnings filing dates from earnings_dates.parquet (bt fetch-earnings); empty without the file. */
+  async earnings() {
+    const f = join(this.dir, "earnings_dates.parquet");
+    if (!existsSync(f)) return [];
+    return this.db.all<{ ticker: string; filing_date: string }>(`select ticker, strftime(filing_date, '%Y-%m-%d') filing_date from read_parquet(${lit(f)}) order by filing_date, ticker`);
+  }
+
   close() { this.db.close(); }
 }

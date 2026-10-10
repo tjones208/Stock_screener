@@ -196,6 +196,14 @@ export async function prepare(o: PrepareOptions) {
       ${details ? `left join (select distinct on (ticker) ticker, sic_code::varchar sic_code from read_json(${lit(details)}, format = 'newline_delimited', union_by_name = true)) dt on dt.ticker = coalesce(t.ticker, a.ticker)` : ""}
     ) to ${lit(join(o.out, "tickers.parquet"))} (format parquet)`);
 
+  // Earnings dates from SEC EDGAR (bt fetch-earnings), when downloaded into the reference folder.
+  const earn = ref("earnings_dates.csv");
+  if (earn) {
+    await db.run(`copy (select ticker::varchar ticker, cik::varchar cik, filing_date::date filing_date
+      from read_csv(${lit(earn)}, header = true, columns = {'ticker': 'varchar', 'cik': 'varchar', 'filing_date': 'date'})) to ${lit(join(o.out, "earnings_dates.parquet"))} (format parquet)`);
+    log("  Earnings dates copied from the reference folder.");
+  }
+
   // Dividends as cash per split-adjusted share.
   const divs = ref("dividends.jsonl");
   await db.run(`copy (

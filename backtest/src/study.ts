@@ -19,13 +19,15 @@ export type StudySpec = { strategy: string; params?: Record<string, unknown>; fr
 
 type Acc = { n: number[]; sum: number[]; pos: number[]; posNet: number[] };
 const acc = (k: number): Acc => ({ n: Array(k).fill(0), sum: Array(k).fill(0), pos: Array(k).fill(0), posNet: Array(k).fill(0) });
-type Item = { t: string; sig: boolean; year: string; d: string; entry: number; r: (number | null)[] };
+export type Item = { t: string; sig: boolean; year: string; d: string; entry: number; r: (number | null)[] };
 
 export type StudyRow = {
   year: string; signals: number; signalDays: number; baseline: number;
   sig: (number | null)[]; base: (number | null)[]; edge: (number | null)[]; sigWin: (number | null)[]; baseWin: (number | null)[];
   /** Signal return minus the cost, and that minus the universe. */
   net: (number | null)[]; netEdge: (number | null)[]; netWin: (number | null)[];
+  /** More groups (e.g. the earnings study's bottom 10% and all events): count, average return, share positive. */
+  extra?: Record<string, { n: number; avg: (number | null)[]; win: (number | null)[] }>;
 };
 export type StudyResult = {
   name: string; strategy: string; params: Record<string, unknown>; from: string; to: string; horizons: number[]; created: string; cost: number; batch: string | null;
@@ -149,13 +151,16 @@ const f = (x: number | null, k = 2) => (x == null ? "" : (x * 100).toFixed(k));
 
 export function studyCsv(r: StudyResult) {
   const H = r.horizons;
+  const extraKeys = [...new Set(r.rows.flatMap((x) => Object.keys(x.extra ?? {})))];
   const head = ["year", "signals", "signal_days", "baseline_stock_days",
     ...H.map((h) => `signal_${h}d_pct`), ...H.map((h) => `baseline_${h}d_pct`), ...H.map((h) => `edge_${h}d_pct`),
     ...H.map((h) => `signal_${h}d_win_pct`), ...H.map((h) => `baseline_${h}d_win_pct`),
-    ...H.map((h) => `cost_adjusted_${h}d_pct`), ...H.map((h) => `edge_after_cost_${h}d_pct`), ...H.map((h) => `cost_adjusted_${h}d_win_pct`)];
+    ...H.map((h) => `cost_adjusted_${h}d_pct`), ...H.map((h) => `edge_after_cost_${h}d_pct`), ...H.map((h) => `cost_adjusted_${h}d_win_pct`),
+    ...extraKeys.flatMap((g) => [`${g}_n`, ...H.map((h) => `${g}_${h}d_pct`), ...H.map((h) => `${g}_${h}d_win_pct`)])];
   return [head.join(","), ...r.rows.map((x) => [x.year, x.signals, x.signalDays, x.baseline,
     ...x.sig.map((v) => f(v, 3)), ...x.base.map((v) => f(v, 3)), ...x.edge.map((v) => f(v, 3)), ...x.sigWin.map((v) => f(v, 1)), ...x.baseWin.map((v) => f(v, 1)),
-    ...x.net.map((v) => f(v, 3)), ...x.netEdge.map((v) => f(v, 3)), ...x.netWin.map((v) => f(v, 1))].join(","))].join("\n") + "\n";
+    ...x.net.map((v) => f(v, 3)), ...x.netEdge.map((v) => f(v, 3)), ...x.netWin.map((v) => f(v, 1)),
+    ...extraKeys.flatMap((g) => { const e = x.extra?.[g]; return [e?.n ?? "", ...H.map((_, k) => f(e?.avg[k] ?? null, 3)), ...H.map((_, k) => f(e?.win[k] ?? null, 1))]; })].join(","))].join("\n") + "\n";
 }
 
 /** One CSV for a batch: the all-years row of each study, one line per horizon. */
@@ -175,7 +180,9 @@ export function studyTable(r: StudyResult) {
   const p = (x: number | null) => (x == null ? "—" : `${x >= 0 ? "+" : ""}${(x * 100).toFixed(2)}%`).padStart(8);
   const head = `${"Year".padEnd(5)} ${"Signals".padStart(7)}  ${H.map((h) => `Sig ${h}d`.padStart(8)).join(" ")}  ${H.map((h) => `Base ${h}d`.padStart(8)).join(" ")}  ${H.map((h) => `Edge ${h}d`.padStart(8)).join(" ")}  ${H.map((h) => `Net ${h}d`.padStart(8)).join(" ")}  ${H.map((h) => `NetEdge${h}`.padStart(9)).join(" ")}`;
   return [head, ...r.rows.map((x) => `${x.year.padEnd(5)} ${String(x.signals).padStart(7)}  ${x.sig.map(p).join(" ")}  ${x.base.map(p).join(" ")}  ${x.edge.map(p).join(" ")}  ${x.net.map(p).join(" ")}  ${x.netEdge.map((v) => p(v).padStart(9)).join(" ")}`),
-    `Net = signal return minus ${(r.cost * 100).toFixed(2)}% cost; NetEdge = Net minus the universe.`].join("\n");
+    `Net = signal return minus ${(r.cost * 100).toFixed(2)}% cost; NetEdge = Net minus the universe.`,
+    ...[...new Set(r.rows.flatMap((x) => Object.keys(x.extra ?? {})))].flatMap((g) => [`${g}:`,
+      ...r.rows.map((x) => `${x.year.padEnd(5)} ${String(x.extra?.[g]?.n ?? 0).padStart(7)}  ${(x.extra?.[g]?.avg ?? []).map(p).join(" ")}`)])].join("\n");
 }
 
 // Folder names: letters, digits, "-" and "_" only, kept short (Windows rejects some characters and long paths).
