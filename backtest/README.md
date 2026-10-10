@@ -205,7 +205,11 @@ daily scan), and writes `montecarlo-<name>.csv` (5th / median / 95th percentile 
 and end value per config, and the share of seeds beating the benchmark's CAGR) plus
 `montecarlo-<name>-runs.csv` (one line per seed). A `grid` block (`batches/neighborhood-rs_rsi2.json`) runs every combination of
 `axes` on top of `params` in one pass and writes `<output>-<name>.csv`: one row per run (axis values,
-CAGR, max drawdown, end value) and a summary (median CAGR, runs with CAGR above `beat`). A run with
+CAGR, max drawdown, end value, trades, average sessions held, time-stop exits and their min / max
+sessions, which equal `max_hold_days`) and a summary (median CAGR, runs with CAGR above `beat`).
+`holdscan-rs_rsi2.json` scans max_hold_days 17–23; `holdcheck-rs_rsi2.json` runs 15 / 20 / 25.
+Note: the `days` column in trades.csv and "average hold" in stats are calendar days; the grid's
+session counts are trading sessions. A run with
 `"requires": "sectors"` is skipped (with a note in the log) when the data has no SIC codes. A setting
 can be switched off with `null` (in JSON, `--set stop_atr=null`, or typed into the app).
 

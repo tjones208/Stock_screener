@@ -87,7 +87,7 @@ test("grid batch: every combination in one pass, per-run rows and a median / bea
   }, out);
   assert.equal(r.rows.length, 4);
   const lines = readFileSync(join(r.dir, "neighborhood-nb.csv"), "utf8").trim().split("\n");
-  assert.equal(lines[0], "run,max_positions,max_atr_pct,cagr,max_drawdown,end_value");
+  assert.equal(lines[0], "run,max_positions,max_atr_pct,cagr,max_drawdown,end_value,trades,avg_sessions_held,time_stop_exits,time_stop_avg_sessions,time_stop_min_sessions,time_stop_max_sessions");
   assert.match(lines[1], /^max_positions=2 max_atr_pct=null,2,null,/);
   assert.match(lines[4], /^max_positions=3 max_atr_pct=0\.03,3,0\.03,/);
   const cagrs = r.rows.map((x) => x.stats.cagr);
@@ -130,4 +130,21 @@ test("batch folders: plain short names; a folder that can't be written doesn't l
   } finally {
     Date.prototype.toISOString = orig;
   }
+});
+
+test("max_hold_days: every time-stop exit is exactly max_hold_days sessions after entry, for each value", async () => {
+  const { src, days } = market();
+  const out = mkdtempSync(join(tmpdir(), "bt-hold-"));
+  const r = await runBatch(src, {
+    name: "h", from: days[260], to: days.at(-1)!, capital: 25_000, slippageBps: 10, bench: [],
+    grid: { strategy: "rs_rsi2", params: { ...base, rank_by: "rs", max_positions: 8 }, axes: { max_hold_days: [5, 10, 15] }, output: "holdcheck" },
+  }, out);
+  for (const [k, n] of [5, 10, 15].entries()) {
+    const h = r.rows[k].holds;
+    assert.ok(h.timeStops > 0, `hold ${n}: some time stops`);
+    assert.deepEqual([h.timeStopMin, h.timeStopMax], [n, n], `hold ${n}`);
+    assert.ok(h.avgSessions! <= n);
+  }
+  // Longer holds → fewer trades (slots turn over less often).
+  assert.ok(r.rows[0].holds.trades > r.rows[1].holds.trades && r.rows[1].holds.trades > r.rows[2].holds.trades);
 });

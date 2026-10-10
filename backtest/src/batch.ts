@@ -125,7 +125,16 @@ export async function runBatch(data: DataSource, spec: BatchSpec, resultsDir: st
 }
 
 type PassRun = { label: string; strategy: string; params: Record<string, unknown>; group?: string; seed?: number };
-type PassRow = { folder: string; label: string; strategy: string; params: Record<string, unknown>; stats: Stats; group?: string; seed?: number };
+type PassRow = { folder: string; label: string; strategy: string; params: Record<string, unknown>; stats: Stats; group?: string; seed?: number; holds: HoldStats };
+
+/** Holding periods in trading sessions (entry open → exit open), overall and for time-stop exits. */
+export type HoldStats = { trades: number; avgSessions: number | null; timeStops: number; timeStopAvgSessions: number | null; timeStopMin: number | null; timeStopMax: number | null };
+export function holdStats(closed: { entryD: string; exitD: string; exitTag?: string }[], dayIndex: Map<string, number>): HoldStats {
+  const sess = (c: { entryD: string; exitD: string }) => (dayIndex.get(c.exitD) ?? NaN) - (dayIndex.get(c.entryD) ?? NaN);
+  const all = closed.map(sess).filter(Number.isFinite), ts = closed.filter((c) => c.exitTag === "time_stop").map(sess).filter(Number.isFinite);
+  const avg = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
+  return { trades: closed.length, avgSessions: avg(all), timeStops: ts.length, timeStopAvgSessions: avg(ts), timeStopMin: ts.length ? Math.min(...ts) : null, timeStopMax: ts.length ? Math.max(...ts) : null };
+}
 
 /** Benchmarks, then every run in one pass over the data; writes run folders, batch.json and batch.csv. */
 async function runOnePass(data: DataSource, spec: BatchSpec, resultsDir: string, emit: (e: BatchEvent) => void, runs: PassRun[], benchFirst: string | null, what: string) {
@@ -159,11 +168,13 @@ async function runOnePass(data: DataSource, spec: BatchSpec, resultsDir: string,
     return { def, params: r.params };
   }), { ...opt, onProgress: (done, total) => emit({ type: "progress", run: 1, runs: 1, label: `${runs.length} runs`, done, total }) });
 
+  const dayIndex = new Map(days.map((d, k) => [d, k]));
   const rows: PassRow[] = results.map((res, k) => {
     const r = runs[k], stats = statsOf(res, tax);
-    return { folder: `run-${String(k + 1).padStart(3, "0")}-${slug(r.label)}`, label: r.label, strategy: r.strategy, params: r.params, stats, group: r.group, seed: r.seed };
+    return { folder: `run-${String(k + 1).padStart(3, "0")}-${slug(r.label)}`, label: r.label, strategy: r.strategy, params: r.params, stats, group: r.group, seed: r.seed,
+      holds: holdStats(res.closed, dayIndex) };
   });
-  const json = JSON.stringify({ name, created: new Date().toISOString(), spec: { ...spec, from, to }, benchmarks: bench, runs: rows.map(({ group: _g, seed: _s, ...x }) => x) }, null, 2);
+  const json = JSON.stringify({ name, created: new Date().toISOString(), spec: { ...spec, from, to }, benchmarks: bench, runs: rows.map(({ group: _g, seed: _s, holds: _h, ...x }) => x) }, null, 2);
   writeFileSync(join(dir, "batch.json"), json);
   writeFileSync(join(dir, "batch.csv"), sweepCsv(rows.map((x) => ({ params: { label: x.label, strategy: x.strategy, ...x.params }, stats: x.stats }))));
   /** Per-run folders (equity, trades, fills): written after the summary files, failures logged. */
@@ -187,8 +198,10 @@ async function runGrid(data: DataSource, spec: BatchSpec, resultsDir: string, em
   const beat = g.beat ?? 0;
   const esc = (v: string) => (/[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
   const f = (x: number | null | undefined, k = 6) => (x == null || !Number.isFinite(x) ? "" : String(+x.toFixed(k)));
-  const lines = [["run", ...keys, "cagr", "max_drawdown", "end_value"].join(",")];
-  rows.forEach((r, k) => lines.push([esc(r.label), ...keys.map((x) => show(combos[k][x])), f(r.stats.cagr), f(r.stats.maxDrawdown), f(r.stats.endValue, 2)].join(",")));
+  // Trades and holding periods in sessions (entry open → exit open): time-stop exits should all be max_hold_days.
+  const lines = [["run", ...keys, "cagr", "max_drawdown", "end_value", "trades", "avg_sessions_held", "time_stop_exits", "time_stop_avg_sessions", "time_stop_min_sessions", "time_stop_max_sessions"].join(",")];
+  rows.forEach((r, k) => lines.push([esc(r.label), ...keys.map((x) => show(combos[k][x])), f(r.stats.cagr), f(r.stats.maxDrawdown), f(r.stats.endValue, 2),
+    r.holds.trades, f(r.holds.avgSessions, 2), r.holds.timeStops, f(r.holds.timeStopAvgSessions, 2), r.holds.timeStopMin ?? "", r.holds.timeStopMax ?? ""].join(",")));
   const cagrs = rows.map((r) => r.stats.cagr);
   const med = percentile(cagrs, 0.5), above = cagrs.filter((c) => c > beat).length;
   lines.push("", "summary,value", `runs,${rows.length}`, `median_cagr,${f(med)}`, `runs_with_cagr_above_${f(beat * 100, 2)}pct,${above}`,
@@ -197,7 +210,8 @@ async function runGrid(data: DataSource, spec: BatchSpec, resultsDir: string, em
   const file = `${g.output ?? "grid"}-${slug(name)}.csv`;
   writeFileSync(join(dir, file), lines.join("\n") + "\n");
   const pc = (x: number | null) => (x == null ? "—" : `${(x * 100).toFixed(1)}%`);
-  for (const r of rows) emit({ type: "log", text: `${r.label}: CAGR ${pc(r.stats.cagr)}, max drawdown ${pc(r.stats.maxDrawdown)}, end value $${Math.round(r.stats.endValue).toLocaleString()}` });
+  for (const r of rows) emit({ type: "log", text: `${r.label}: CAGR ${pc(r.stats.cagr)}, max drawdown ${pc(r.stats.maxDrawdown)}, end value $${Math.round(r.stats.endValue).toLocaleString()}, ` +
+    `${r.holds.trades} trades, ${r.holds.avgSessions?.toFixed(1) ?? "—"} sessions held on average (time stops: ${r.holds.timeStops}, ${r.holds.timeStopMin ?? "—"}–${r.holds.timeStopMax ?? "—"} sessions)` });
   emit({ type: "log", text: `Median CAGR across ${rows.length} runs: ${pc(med)}; ${above} of ${rows.length} beat ${pc(beat)}. Saved ${file}.` });
   writeFolders();
   emit({ type: "done", dir });
